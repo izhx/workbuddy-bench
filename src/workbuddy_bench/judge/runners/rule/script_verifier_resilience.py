@@ -1,27 +1,15 @@
-"""Resilience hardening for single-try script verifiers (issue #6).
+"""Rewrite single-try script verifiers for independent checks and a fixed denominator.
 
-``script_verifier`` tasks grade a submission by running ``tests/verifier.py``.
-That script executes every check inside one ``try`` block and reports the score
-in ``finally: write_reward()``. Unguarded "setup" statements between checks call
-the submission directly; when one of them raises, the whole ``try`` block aborts
-and every later check is silently skipped. Because ``write_reward()`` divides by
-``len(RESULTS)``, a submission that crashes the verifier early ends up with a
-*smaller denominator* — and therefore a *higher* score (a defective
-implementation can score ``6/6 == 1.0`` where the reference solution scores
-``12/12 == 1.0``).
+``script_verifier`` tasks run ``tests/verifier.py``. This module rewrites a
+script that records every check in one ``try`` and scores in
+``finally: write_reward()``:
 
-Two complementary hardening layers are provided:
-
-1. **Independent execution** (:func:`transform_script`). The verifier is
-   rewritten so each check runs independently: an exception raised by one
-   check's setup statement is swallowed and the following checks still run, so
-   an ordinary crash can no longer truncate the run.
+1. **Independent execution** (:func:`transform_script`). Each check's setup is
+   wrapped so an exception is recorded as a failure and later checks still run.
 
 2. **Fixed denominator** (:func:`transform_script` and
-   :func:`reconcile_reward_payload`). The reward denominator is fixed to the
-   number of checks the verifier declares (a conservative, never-overcounting
-   count), so even an unswallowable early abort cannot shrink the denominator.
-   Checks that never ran are scored as failures.
+   :func:`reconcile_reward_payload`). ``write_reward`` uses the number of checks
+   the verifier declares; checks that never ran are recorded as failures.
 """
 
 from __future__ import annotations

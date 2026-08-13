@@ -81,12 +81,9 @@ class HarborAttemptRuntime:
             source_dir=self.verifier.task.paths.tests_dir,
             target_dir=self.tests_dir,
         )
-        # Hardening for single-try script verifiers (GitHub issue #6): a
-        # submission that makes an unguarded setup statement in verifier.py
-        # raise can abort the whole try block, shrink the reward denominator and
-        # inflate the score. Rewrite verifier.py so each check runs
-        # independently and the denominator is fixed, then overwrite the copy in
-        # the container — the dataset command still runs /tests/verifier.py.
+        # If verifier.py is a single-try script, rewrite it so each check runs
+        # independently and write_reward uses a fixed denominator, then overwrite
+        # the uploaded copy. The dataset command still runs /tests/verifier.py.
         transformed = transform_verifier_file(self.verifier.task.paths.tests_dir / "verifier.py")
         if transformed is None:
             return

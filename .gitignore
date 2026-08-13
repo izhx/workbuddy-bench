@@ -36,8 +36,6 @@ scripts/local/
 scripts/logs/
 # top-level scratch dir only; dataset tests/ trees stay tracked
 /tests
-!/tests/
-!/tests/test_script_verifier_resilience.py
 
 # === Machine-generated eval outputs ===
 /jobs/

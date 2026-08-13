@@ -45,12 +45,9 @@ from workbuddy_bench.judge.runners.rule.script_verifier_resilience import (
 def _reconcile_fixed_denominator(context: EvaluationContext, payload: dict[str, Any]) -> dict[str, Any]:
     """Enforce the verifier's declared check count as a fixed denominator.
 
-    A single-try script verifier computes ``overall = passed / len(RESULTS)``;
-    when an unguarded setup statement aborts the run early, ``len(RESULTS)``
-    shrinks and the score is inflated (issue #6). As a safety net on top of the
-    runtime transformation in :meth:`HarborAttemptRuntime.upload_tests`, the
-    payload is reconciled against the number of checks the original verifier
-    declares, treating never-run checks as failures.
+    Reconcile the reward payload against the number of checks the original
+    verifier declares, treating never-run checks as failures. Complements the
+    runtime rewrite in :meth:`HarborAttemptRuntime.upload_tests`.
     """
     task_dir = context.host_paths.get("task_dir")
     if not task_dir:
