@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -9,6 +10,9 @@ from typing import Any, Mapping
 from harbor.models.trial.paths import EnvironmentPaths
 
 from workbuddy_bench.judge.core import ArtifactWriter, EvaluationContext, ScoreResult
+from workbuddy_bench.judge.runners.rule.script_verifier_resilience import (
+    transform_verifier_file,
+)
 
 
 def merged_verifier_env(
@@ -77,6 +81,21 @@ class HarborAttemptRuntime:
             source_dir=self.verifier.task.paths.tests_dir,
             target_dir=self.tests_dir,
         )
+        # If verifier.py is a single-try script, rewrite it so each check runs
+        # independently and write_reward uses a fixed denominator, then overwrite
+        # the uploaded copy. The dataset command still runs /tests/verifier.py.
+        transformed = transform_verifier_file(self.verifier.task.paths.tests_dir / "verifier.py")
+        if transformed is None:
+            return
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".py", encoding="utf-8", delete=False
+        ) as tmp:
+            tmp.write(transformed)
+            tmp_path = Path(tmp.name)
+        try:
+            await self.environment.upload_file(tmp_path, f"{self.tests_dir}/verifier.py")
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
     async def upload_dir(self, *, source_dir: Path, target_dir: str) -> None:
         await self.environment.upload_dir(source_dir=source_dir, target_dir=target_dir)

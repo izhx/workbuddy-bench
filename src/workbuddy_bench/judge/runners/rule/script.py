@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Awaitable
 
 from workbuddy_bench.judge.core.models import (
@@ -34,6 +35,33 @@ from workbuddy_bench.judge.runners.rule.reward_payload import (
     status_from_payload,
     verdicts_from_payload,
 )
+from workbuddy_bench.judge.runners.rule.script_verifier_resilience import (
+    declared_check_count,
+    is_vulnerable_script_verifier,
+    reconcile_reward_payload,
+)
+
+
+def _reconcile_fixed_denominator(context: EvaluationContext, payload: dict[str, Any]) -> dict[str, Any]:
+    """Enforce the verifier's declared check count as a fixed denominator.
+
+    Reconcile the reward payload against the number of checks the original
+    verifier declares, treating never-run checks as failures. Complements the
+    runtime rewrite in :meth:`HarborAttemptRuntime.upload_tests`.
+    """
+    task_dir = context.host_paths.get("task_dir")
+    if not task_dir:
+        return payload
+    verifier_py = Path(task_dir) / "tests" / "verifier.py"
+    if not verifier_py.is_file():
+        return payload
+    try:
+        source = verifier_py.read_text(encoding="utf-8")
+    except OSError:
+        return payload
+    if not is_vulnerable_script_verifier(source):
+        return payload
+    return reconcile_reward_payload(payload, declared_check_count(source))
 
 
 def _judge_result_status(test_status: str) -> VerdictStatus:
@@ -116,6 +144,8 @@ class ScriptRuleJudgeRunner(RuleJudgeRunner):
 
         read_result = read_score_reward_payload(context=context, cwd=cwd, config=config)
         payload = read_result.payload
+        if payload is not None:
+            payload = _reconcile_fixed_denominator(context, payload)
         if payload is None:
             checked = ", ".join(path.as_posix() for path in read_result.checked_paths)
             detail = "; ".join(read_result.errors)
