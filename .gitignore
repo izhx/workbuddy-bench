@@ -49,11 +49,11 @@ scripts/logs/
 !/datasets/README.md
 
 # === Config churn — ship only templates/reference ===
-configs/models/**
-!configs/models/_template.model.yaml
-configs/jobs/*
-!configs/jobs/_reference.yaml
-!configs/jobs/_template.job.yaml
+# configs/models/**
+# !configs/models/_template.model.yaml
+# configs/jobs/*
+# !configs/jobs/_reference.yaml
+# !configs/jobs/_template.job.yaml
 
 # === Editor/agent local state — keep skills, drop the rest ===
 .claude/*
