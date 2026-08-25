@@ -1,0 +1,43 @@
+name: workbuddy-bench-controller
+
+services:
+  controller:
+    image: "${WB_CONTROLLER_IMAGE:-daily-dev:privAcc-docker-claude-codex}"
+    pull_policy: never
+
+    # The controller proxy must listen on the host network so Harbor-created
+    # sibling containers can reach it through host.docker.internal.
+    network_mode: host
+
+    # The image already selects the intended non-root user. Add only the
+    # runtime group that owns the host Docker socket.
+    group_add:
+      - "${WB_DOCKER_GID:?set WB_DOCKER_GID to the docker.sock GID}"
+
+    working_dir: "${WB_REPO_ROOT:?set WB_REPO_ROOT to the absolute host repository path}"
+    init: true
+    stdin_open: true
+    tty: true
+    stop_grace_period: 2m
+
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: "${WB_REPO_ROOT}/src"
+      UV_PROJECT_ENVIRONMENT: "${WB_REPO_ROOT}/.workspace/controller-venv"
+      UV_CACHE_DIR: "${WB_REPO_ROOT}/.workspace/controller-uv-cache"
+
+    volumes:
+      # Keep the same absolute repository path inside and outside the
+      # controller because the host Docker daemon resolves Harbor bind mounts.
+      - type: bind
+        source: "${WB_REPO_ROOT}"
+        target: "${WB_REPO_ROOT}"
+        bind:
+          create_host_path: false
+
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        bind:
+          create_host_path: false
