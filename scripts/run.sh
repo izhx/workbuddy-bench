@@ -22,12 +22,14 @@ set -e
 # ── Parse arguments ──────────────────────────────────────────────
 JOB_SLUG=""
 DRY_RUN="${DRY_RUN:-0}"  # honor `DRY_RUN=1 ./run.sh ...`; --dry-run also sets it
+TASK_IMAGE_TAG_CLI=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --job)     JOB_SLUG="$2"; shift 2;;
+        --task-image-tag) TASK_IMAGE_TAG_CLI="$2"; shift 2;;
         --dry-run) DRY_RUN=1; shift;;
         --help|-h)
-            echo "Usage: $0 --job <slug> [--dry-run]"
+            echo "Usage: $0 --job <slug> [--task-image-tag latest|YYYY-MM-DD] [--dry-run]"
             echo ""
             echo "Jobs (from configs/jobs/, excluding _template*):"
             ls configs/jobs/*.yaml 2>/dev/null \
@@ -38,6 +40,7 @@ while [[ $# -gt 0 ]]; do
             echo "  SHARDS=N              Parallel harbor shards (default: 1)"
             echo "  SHARD_CONCURRENCY=N   Concurrency within each shard (default: job n_concurrent_trials, else 2)"
             echo "  NO_FORCE_BUILD=1      Skip Docker image rebuild"
+            echo "  TASK_IMAGE_TAG=TAG    Enable reusable task images with latest or YYYY-MM-DD (unset: disabled)"
             echo "  DISABLE_VERIFICATION=1  Run agent rollout only; skip task verification and host-side LLM judge"
             echo "  AUTO_BUILD_HARNESS_MOUNT=1   Build a missing local harness mount image"
             echo "  PROXY_PORT=N          Preferred job-private proxy port (default: 3456)"
@@ -231,6 +234,19 @@ find_free_proxy_port() {
 MANIFEST_PATH="$INSTANCE_STATE_DIR/manifest.json"
 RESOLVE_STAGE_FLAG=()
 [ "$DRY_RUN" = "1" ] && RESOLVE_STAGE_FLAG=(--no-stage)
+TASK_IMAGE_TAG_INPUT="${TASK_IMAGE_TAG_CLI:-${TASK_IMAGE_TAG:-}}"
+RESOLVED_TASK_IMAGE_TAG=""
+if [ -n "$TASK_IMAGE_TAG_INPUT" ]; then
+    RESOLVED_TASK_IMAGE_TAG="$(python3 - "$TASK_IMAGE_TAG_INPUT" <<'PY'
+import sys
+from workbuddy_bench.runner.task_images import validate_task_image_tag
+try:
+    print(validate_task_image_tag(sys.argv[1]))
+except ValueError as exc:
+    raise SystemExit(f"ERROR: {exc}")
+PY
+)" || exit $?
+fi
 python3 -m workbuddy_bench.runner.resolve_manifest \
     --job-config "$JOB_CONFIG" \
     --model-config "$MODEL_CONFIG" \
@@ -513,6 +529,7 @@ eval "$_USER_VARS"
 prep_cmd=(python3 -m workbuddy_bench.runner.prepare_tasks "$EFFECTIVE_TASKS_DIR")
 [ -n "$AGENT_USER" ] && prep_cmd+=(--agent-user "$AGENT_USER")
 [ -n "$VERIFIER_USER" ] && prep_cmd+=(--verifier-user "$VERIFIER_USER")
+[ -n "$RESOLVED_TASK_IMAGE_TAG" ] && prep_cmd+=(--task-image-tag "$RESOLVED_TASK_IMAGE_TAG")
 "${prep_cmd[@]}"
 
 if [ "${SHARDS:-1}" -gt 1 ] || [ "${HAS_TASK_SELECTION:-0}" -ne 0 ]; then

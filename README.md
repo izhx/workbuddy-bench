@@ -117,6 +117,27 @@ uv run ./scripts/run.sh --job <slug> --dry-run  # preview what will run, then ex
 uv run ./scripts/run.sh --job <slug>            # run it
 ```
 
+Task sandboxes can use explicitly enabled reusable local images named
+`<dataset-id>/<task>:<tag>` (for example,
+`wb-bench-code-v1.0/<task>:2026-08-27`). Reuse has no default tag: first build
+the images, then run with the same explicit tag and `force_build=false`:
+
+```bash
+uv run python -m workbuddy_bench.runner.task_images build \
+  datasets/wb-bench-code-v1.0/tasks --tag 2026-08-27
+
+# Reuse is opt-in: set environment_override.force_build=false in the job.
+uv run ./scripts/run.sh --job <slug> --task-image-tag 2026-08-27
+```
+
+Without `--task-image-tag` (or `TASK_IMAGE_TAG`), the runner does not inject
+`environment.docker_image` and preserves the original benchmark behavior. With
+an explicit tag, it injects only into the staged dataset copy; checked-in task
+files remain unchanged. Harbor's existing `force_build` switch still decides
+whether to build or reuse. The runner never builds missing task images
+automatically. See
+[`configs/README.md`](configs/README.md) for the full policy.
+
 Results land under `results/`. The full set of job and model fields is documented
 in [`configs/README.md`](configs/README.md).
 

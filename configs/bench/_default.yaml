@@ -12,7 +12,7 @@ quiet: false
 environment:
   type: docker
   import_path: workbuddy_bench.runner.docker_environment:WorkBuddyDockerEnvironment
-  force_build: true
+  force_build: false
   delete: false
 
 # Exec user for the agent rollout / verifier. Non-root `dev` so every harness
