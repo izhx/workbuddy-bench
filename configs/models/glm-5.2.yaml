@@ -80,8 +80,9 @@ model:
   params:
     # max_output_tokens: 16384
     # temperature: 0.0
-    # thinking_enabled: false
-    # extra_body:                       # provider-specific extras
+    thinking_enabled: true
+    extra_body:                       # provider-specific extras
+        reasoning_effort: high
     #   chat_template_kwargs:           # NOTE: extra_body is injected only by
     #     enable_thinking: false        # the local proxy -> requires
     #                                   # model_connection: local_proxy

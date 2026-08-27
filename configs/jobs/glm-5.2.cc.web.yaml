@@ -55,8 +55,8 @@ model_connection: local_proxy
 # OPTIONAL — extra hosts added to the agent-phase network allowlist (list).
 # Needed when local_proxy + egress control means the container reaches the
 # model only via host.docker.internal — that host must be allowlisted.
-extra_allowed_hosts:
-  - host.docker.internal
+# extra_allowed_hosts:
+#   - host.docker.internal
 
 # OPTIONAL — attempts per task; defaults to configs/bench/::n_attempts.
 # n_attempts: 3

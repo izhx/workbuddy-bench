@@ -83,9 +83,10 @@ model:
     top_p: 0.95
     thinking_enabled: true
     extra_body:
-      # Kimi K2.6 does not support reasoning_effort. Enable its native thinking
-      # request parameter instead; local_proxy flattens this into the request.
-      thinking:
-        type: enabled
+      # NOTE: no `thinking` param here. Kimi K2.6 does not support
+      # reasoning_effort, and its native `thinking` request parameter cannot be
+      # used through this gateway either: the upstream LiteLLM proxy rejects a
+      # top-level `thinking` key with 400 UnsupportedParamsError, which failed
+      # every judge call (judge_status: api_failed, all rubric scores 0).
       response_format:
         type: json_object
