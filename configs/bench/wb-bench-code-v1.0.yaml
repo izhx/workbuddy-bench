@@ -14,6 +14,10 @@
 n_attempts: 3
 timeout_multiplier: 2.0
 
+
+# Avoid file permission issues from 640.
+verifier_user: "root"
+
 # Context window + compaction (cbc_agent translates these into env). A job may
 # still override per-run via top-level context_window / context_compact_pct.
 context_window: 200000

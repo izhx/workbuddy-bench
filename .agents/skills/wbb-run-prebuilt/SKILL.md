@@ -1,6 +1,6 @@
 ---
 name: wbb-run-prebuilt
-description: Launch one or more WorkBuddy Bench jobs with already-prebuilt task images. Use when a run must reuse local task images under one explicit shared tag, with exact task-selection preflight and no task image builds.
+description: Launch one or more WorkBuddy Bench jobs with already-prebuilt task images. Use when a run must reuse local task images under one explicit shared tag, with exact task-selection preflight, no task image builds, and human-readable command output saved under results.
 ---
 
 # Run WBB with Prebuilt Images
@@ -60,16 +60,35 @@ confirmation after all preflights pass.
 For one job:
 
 ```bash
+mkdir -p results
+RUN_LOG="$(pwd)/results/wbb-run-$(date -u +%Y-%m-%dT%H-%M-%SZ)-$$-<job-slug>.log"
+printf 'jobs=%s\ntask_image_tag=%s\nlog=%s\n' \
+  '<job-slug>' '<tag>' "$RUN_LOG" | tee "$RUN_LOG"
+set -o pipefail
 NO_FORCE_BUILD=1 uv run ./scripts/run.sh \
-  --job <job-slug> --task-image-tag <tag>
+  --job <job-slug> --task-image-tag <tag> \
+  2>&1 | tee -a "$RUN_LOG"
 ```
 
 For multiple jobs, preserve the requested order:
 
 ```bash
+mkdir -p results
+RUN_LOG="$(pwd)/results/wbb-run-$(date -u +%Y-%m-%dT%H-%M-%SZ)-$$-batch.log"
+printf 'jobs=%s\ntask_image_tag=%s\nlog=%s\n' \
+  '<job-a> <job-b>' '<tag>' "$RUN_LOG" | tee "$RUN_LOG"
+set -o pipefail
 NO_FORCE_BUILD=1 scripts/run-jobs.sh \
-  --task-image-tag <tag> <job-a> <job-b>
+  --task-image-tag <tag> <job-a> <job-b> \
+  2>&1 | tee -a "$RUN_LOG"
 ```
+
+Run each complete block in one Bash invocation so `RUN_LOG` and `pipefail`
+apply to the evaluation pipeline. The log is a regular file directly under
+`results/`, rather than a directory that could be confused with a Harbor job.
+`tee` keeps the output visible live while saving combined stdout and stderr;
+`pipefail` preserves the evaluation command's nonzero status. The UTC timestamp
+plus shell PID keeps concurrent launch logs distinct.
 
 `NO_FORCE_BUILD=1` makes this launch use Harbor's `force_build=false` path
 without editing the job YAML. The explicit tag causes `docker_image` references
@@ -78,5 +97,6 @@ manifests remain unchanged.
 
 `scripts/run-jobs.sh` runs jobs sequentially and stops on the first failure.
 Report which jobs completed, which job failed, and which later jobs were not
-started. Do not retry, rebuild images, or change job configuration unless the
-user requests it.
+started. Always print the resolved operator log path before launch and include
+it in the handoff, whether the run succeeds or fails. Do not retry, rebuild
+images, or change job configuration unless the user requests it.
