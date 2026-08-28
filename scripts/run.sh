@@ -13,6 +13,7 @@
 # Usage:
 #   uv run ./scripts/run.sh --job <slug>            # job is the entry point
 #   uv run ./scripts/run.sh --job <slug> --dry-run  # resolve manifest, print, exit
+#   uv run ./scripts/run.sh --job <slug> --resume-job results/<job>/<experiment-dir>
 #   SHARDS=4 uv run ./scripts/run.sh --job <slug>   # sharded / task_selection
 #
 # The model and dataset come from the job YAML's ``model:`` / ``dataset:`` keys
@@ -23,13 +24,22 @@ set -e
 JOB_SLUG=""
 DRY_RUN="${DRY_RUN:-0}"  # honor `DRY_RUN=1 ./run.sh ...`; --dry-run also sets it
 TASK_IMAGE_TAG_CLI=""
+RESUME_JOBS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
         --job)     JOB_SLUG="$2"; shift 2;;
         --task-image-tag) TASK_IMAGE_TAG_CLI="$2"; shift 2;;
+        --resume-job)
+            [ "$#" -ge 2 ] || { echo "ERROR: --resume-job requires a directory." >&2; exit 1; }
+            RESUME_JOBS+=("$2")
+            shift 2;;
         --dry-run) DRY_RUN=1; shift;;
         --help|-h)
-            echo "Usage: $0 --job <slug> [--task-image-tag latest|YYYY-MM-DD] [--dry-run]"
+            echo "Usage: $0 --job <slug> [--task-image-tag latest|YYYY-MM-DD] [--resume-job <dir>]... [--dry-run]"
+            echo ""
+            echo "Options:"
+            echo "  --resume-job DIR      Reuse completed trials from an existing Harbor job directory"
+            echo "                        (repeatable; forces sharded_eval even when SHARDS is unset)"
             echo ""
             echo "Jobs (from configs/jobs/, excluding _template*):"
             ls configs/jobs/*.yaml 2>/dev/null \
@@ -80,6 +90,25 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/.."
 REPO_ROOT="$(pwd)"
 export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+
+# Validate resume inputs before any manifest resolution or runtime setup. Keep
+# the original strings for sharded_eval so CLI logging preserves what the user
+# supplied; relative paths are defined relative to the repository root.
+for resume_job in "${RESUME_JOBS[@]}"; do
+    if [[ "$resume_job" = /* ]]; then
+        resume_job_path="$resume_job"
+    else
+        resume_job_path="$REPO_ROOT/$resume_job"
+    fi
+    [ -e "$resume_job_path" ] || {
+        echo "ERROR: Resume job path does not exist: $resume_job" >&2
+        exit 1
+    }
+    [ -d "$resume_job_path" ] || {
+        echo "ERROR: Resume job path is not a directory: $resume_job" >&2
+        exit 1
+    }
+done
 
 # ── Load .env if present ─────────────────────────────────────────
 if [ -f "$REPO_ROOT/.env" ]; then
@@ -534,11 +563,14 @@ if [ -n "$RESOLVED_TASK_IMAGE_TAG" ]; then
 fi
 "${prep_cmd[@]}"
 
-if [ "${SHARDS:-1}" -gt 1 ] || [ "${HAS_TASK_SELECTION:-0}" -ne 0 ]; then
+if [ "${SHARDS:-1}" -gt 1 ] || [ "${HAS_TASK_SELECTION:-0}" -ne 0 ] || [ "${#RESUME_JOBS[@]}" -gt 0 ]; then
     cmd=(python3 -m workbuddy_bench.runner.sharded_eval \
         --config "$JOB_CONFIG" \
         --shards "${SHARDS:-1}" \
         --manifest "$MANIFEST_PATH")
+    for resume_job in "${RESUME_JOBS[@]}"; do
+        cmd+=(--resume-job "$resume_job")
+    done
     # Only pin per-shard concurrency when SHARD_CONCURRENCY is explicitly set;
     # otherwise sharded_eval defaults it from the job's n_concurrent_trials
     # (orchestrator_override), falling back to 2.
