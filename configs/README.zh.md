@@ -135,6 +135,64 @@ model_connection: local_proxy       # direct | local_proxy
 
 `configs/jobs/` 默认 gitignore，只有少数示例随仓库走（见 `.gitignore` 白名单）。
 
+### 可复用 task 镜像
+
+本地 runner 为每个 task 解析一个镜像：
+
+```text
+<dataset-id>/<normalized-task-name>:<tag>
+```
+
+namespace 直接使用 `dataset.toml` 的完整 id，例如
+`wb-bench-office-v1.0/rule-based-stock-exclusion-l4-011:latest`。
+repository component 会归一化成小写、Docker-safe slug，归一化后重名会直接报错。
+runner 不提供默认 task-image tag：同时省略 `--task-image-tag` 和
+`TASK_IMAGE_TAG` 时不会注入镜像引用。显式提供的值只允许 `latest` 或真实的 UTC
+`YYYY-MM-DD` 日期：
+
+```bash
+TASK_IMAGE_TAG=2026-08-27 uv run ./scripts/run.sh --job <slug>
+uv run ./scripts/run.sh --job <slug> --task-image-tag 2026-08-27
+scripts/run-jobs.sh --task-image-tag 2026-08-27 <slug-a> <slug-b>
+```
+
+复用前必须预先构建镜像，然后使用相同 tag 启动作业：
+
+```bash
+uv run python -m workbuddy_bench.runner.task_images build \
+  datasets/wb-bench-office-v1.0/tasks --tag 2026-08-27
+
+uv run python -m workbuddy_bench.runner.task_images build \
+  datasets/wb-bench-office-v1.0/tasks --tag 2026-08-27 \
+  --include-task rule-based-stock-exclusion-L4-011
+
+uv run ./scripts/run.sh --job <slug> --task-image-tag 2026-08-27
+```
+
+每个镜像带有 task environment 中构建相关内容的 source hash label（不含仅用于
+runtime 编排的 Compose wiring）。独立的 build/preflight 命令会核对本地 label。
+`latest` 是可变 tag，过期时允许重建；日期 tag 视为不可变快照，已有日期 tag 与
+当前 source 不一致时会失败，需要换新日期（或在独立 builder 中显式使用
+`--force`）。task-image 的 tag、引用和 source hash 不会写入 benchmark manifest。
+
+task-image 复用沿用 Harbor 原有开关。默认仍为 `environment.force_build=true`，
+继续走 Dockerfile 构建路径。需要复用时在 job 中显式设置：
+
+```yaml
+environment_override:
+  force_build: false
+```
+
+`NO_FORCE_BUILD=1` 是单次运行的等价开关。显式提供 task-image tag 时，
+`prepare_tasks` 只向 resolved manifest 选中的任务副本注入
+`[environment].docker_image`；没有任务子集时才处理全部任务。没有 tag 就不注入，
+原始 dataset 始终不会被修改。当
+`force_build=true` 且存在 Dockerfile 时，Harbor 会忽略已注入的引用。runner 不会为了
+注入而解析或覆盖 `force_build`，也不会自动 preflight 或构建 task 镜像。当
+`force_build=false` 且镜像缺失时，环境启动会失败（Compose 可能先按默认策略尝试从
+registry 拉取），Harbor 不会回退构建 Dockerfile。harness split-mount 镜像与 task
+镜像相互独立，继续走原有构建和 preflight 流程。
+
 ---
 
 ## 判分（CompositeVerifier）

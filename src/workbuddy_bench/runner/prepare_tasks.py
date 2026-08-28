@@ -7,6 +7,11 @@ from pathlib import Path
 
 import yaml
 
+from workbuddy_bench.runner.task_images import (
+    inject_task_docker_images,
+    selected_tasks_from_manifest,
+)
+
 HOST_GATEWAY_ENTRY = "host.docker.internal:host-gateway"
 # Harbor's egress-control sidecar service name (docker-compose-egress-control.yaml).
 # When a task runs under egress control, Harbor forces ``main`` onto
@@ -379,6 +384,17 @@ def main() -> int:
                         help="Inject [agent].user into each task.toml (default: leave as-is/root)")
     parser.add_argument("--verifier-user", default=None,
                         help="Inject [verifier].user into each task.toml (default: leave as-is/root)")
+    parser.add_argument(
+        "--task-image-tag",
+        default=None,
+        help="Inject a reusable task image using this latest/ISO-date tag (default: disabled)",
+    )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help="Limit task-image injection to manifest.selected_tasks when present",
+    )
     args = parser.parse_args()
 
     compose_changed = ensure_host_gateway_compose(args.tasks_path)
@@ -388,12 +404,20 @@ def main() -> int:
         agent_user=args.agent_user or None,
         verifier_user=args.verifier_user or None,
     )
-    print(
+    summary = (
         "Prepared Harbor tasks: "
         f"compose_changed={compose_changed} "
         f"composite_contract_changed={composite_contract_changed} "
         f"user_changed={user_changed}"
     )
+    if args.task_image_tag is not None:
+        image_changed = inject_task_docker_images(
+            args.tasks_path,
+            tag=args.task_image_tag,
+            include_tasks=selected_tasks_from_manifest(args.manifest),
+        )
+        summary += f" task_image_changed={image_changed}"
+    print(summary)
     return 0
 
 

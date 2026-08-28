@@ -32,4 +32,5 @@ verifier:
 llm_judge:
   enabled: true
   mode: in_container
-  model: kimi-k2.7-think
+  model: judge-kimi-k2.6
+

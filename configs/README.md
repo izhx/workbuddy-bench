@@ -145,6 +145,70 @@ the subset first with `./scripts/dataset/fetch-dataset.sh <subset>` (see
 `configs/jobs/` is gitignored by default; only a few examples ship with the repo
 (see the `.gitignore` allowlist).
 
+### Reusable task images
+
+The local runner resolves one image per task:
+
+```text
+<dataset-id>/<normalized-task-name>:<tag>
+```
+
+The namespace is the full id from `dataset.toml`, for example
+`wb-bench-office-v1.0/rule-based-stock-exclusion-l4-011:latest`.
+Repository components are normalized to lowercase Docker-safe slugs. A
+post-normalization collision is a hard error. The runner has no default task
+image tag: omitting both `--task-image-tag` and `TASK_IMAGE_TAG` disables image
+injection. An explicit value must be either `latest` or a real `YYYY-MM-DD` UTC
+date:
+
+```bash
+TASK_IMAGE_TAG=2026-08-27 uv run ./scripts/run.sh --job <slug>
+uv run ./scripts/run.sh --job <slug> --task-image-tag 2026-08-27
+scripts/run-jobs.sh --task-image-tag 2026-08-27 <slug-a> <slug-b>
+```
+
+Prebuilding is required. Build the images first, then launch the job with the
+same tag:
+
+```bash
+uv run python -m workbuddy_bench.runner.task_images build \
+  datasets/wb-bench-office-v1.0/tasks --tag 2026-08-27
+
+uv run python -m workbuddy_bench.runner.task_images build \
+  datasets/wb-bench-office-v1.0/tasks --tag 2026-08-27 \
+  --include-task rule-based-stock-exclusion-L4-011
+
+uv run ./scripts/run.sh --job <slug> --task-image-tag 2026-08-27
+```
+
+Each built image carries a hash of its build-relevant task environment content
+(runtime-only Compose wiring is excluded). The standalone build/preflight
+commands compare that local label. `latest` is mutable and can be rebuilt when
+stale. A dated tag is treated as immutable: a stale existing date tag fails and
+requires a new date (or an explicit builder `--force`). Task-image
+tag/reference/hash data is deliberately not added to the benchmark manifest.
+
+Task-image reuse follows the existing Harbor switch. The default remains
+`environment.force_build=true`, which keeps the Dockerfile build path. Set this
+in the job to opt into reuse:
+
+```yaml
+environment_override:
+  force_build: false
+```
+
+`NO_FORCE_BUILD=1` is the one-run equivalent. When an explicit task-image tag is
+present, `prepare_tasks` injects `[environment].docker_image` into the copied
+tasks selected by the resolved manifest (or every copied task when there is no
+selection); source datasets are not edited. Without a tag, nothing is injected.
+Harbor ignores an injected reference when `force_build=true` and a Dockerfile
+exists. The runner neither resolves nor overrides `force_build` for this
+injection, and it does not automatically preflight or build task images. With
+`force_build=false`, a missing image causes environment startup to fail (Compose
+may first try its normal registry pull); Harbor does not fall back to building
+the Dockerfile. The harness split-mount image remains separate and follows its
+existing build/preflight flow.
+
 ---
 
 ## Scoring (CompositeVerifier)

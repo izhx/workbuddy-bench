@@ -108,6 +108,25 @@ uv run ./scripts/run.sh --job <slug> --dry-run  # 预览这次会跑什么，然
 uv run ./scripts/run.sh --job <slug>            # 正式跑
 ```
 
+task sandbox 可以显式启用可复用的本地镜像，名称为
+`<dataset-id>/<task>:<tag>`（例如
+`wb-bench-code-v1.0/<task>:2026-08-27`）。复用没有默认 tag：必须先构建镜像，
+再用相同的显式 tag 和 `force_build=false` 启动：
+
+```bash
+uv run python -m workbuddy_bench.runner.task_images build \
+  datasets/wb-bench-code-v1.0/tasks --tag 2026-08-27
+
+# 复用是显式开启的：在 job 中设置 environment_override.force_build=false。
+uv run ./scripts/run.sh --job <slug> --task-image-tag 2026-08-27
+```
+
+未提供 `--task-image-tag`（或 `TASK_IMAGE_TAG`）时，runner 不注入
+`environment.docker_image`，保持原 benchmark 行为。显式提供 tag 后，也只修改
+staged dataset 副本，不会修改版本库里的原始 task；构建还是复用仍完全由 Harbor
+原有的 `force_build` 开关决定。runner 不会自动构建缺失的 task 镜像。完整规则见
+[`configs/README.zh.md`](configs/README.zh.md)。
+
 结果落在 `results/` 下。job 与 model 的完整字段说明见
 [`configs/README.md`](configs/README.md)。
 

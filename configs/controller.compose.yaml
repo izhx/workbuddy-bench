@@ -1,8 +1,8 @@
-name: workbuddy-bench-controller
+name: wbb-dev
 
 services:
   controller:
-    image: "${WB_CONTROLLER_IMAGE:-daily-dev:privAcc-docker-claude-codex}"
+    image: "${WB_CONTROLLER_IMAGE:-daily-dev:dev-docker-claude-codex}"
     pull_policy: never
 
     # The controller proxy must listen on the host network so Harbor-created
@@ -13,6 +13,10 @@ services:
     # runtime group that owns the host Docker socket.
     group_add:
       - "${WB_DOCKER_GID:?set WB_DOCKER_GID to the docker.sock GID}"
+
+    hostname: wbb-dev
+    extra_hosts:
+      - "wbb-dev:127.0.1.1"
 
     working_dir: "${WB_REPO_ROOT:?set WB_REPO_ROOT to the absolute host repository path}"
     init: true
@@ -50,12 +54,13 @@ services:
 
       - type: bind
         source: ${DEV_DATA_ROOT}/dot-claude
-        target: /home/privAcc/.claude
+        target: /agent-data/claude
         bind:
           create_host_path: false
 
       - type: bind
         source: ${DEV_DATA_ROOT}/dot-codex
-        target: /home/privAcc/.codex
+        target: /agent-data/codex
         bind:
           create_host_path: false
+
