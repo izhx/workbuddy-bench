@@ -13,6 +13,8 @@
 n_attempts: 3
 timeout_multiplier: 2.0
 
+# Some tasks put files in /workdir not /workspace, so the agent must run as root to get them.
+agent_user: "root"
 # sec tasks bake their own challenge environment (Dockerfile builds the target
 # binary/service) and the verifier often needs root-owned staging paths. Agent
 # rollout still inherits the non-root default user from _default.yaml.
