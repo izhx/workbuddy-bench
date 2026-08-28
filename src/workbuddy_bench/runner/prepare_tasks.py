@@ -9,6 +9,7 @@ import yaml
 
 from workbuddy_bench.runner.task_images import (
     inject_task_docker_images,
+    selected_tasks_from_manifest,
 )
 
 HOST_GATEWAY_ENTRY = "host.docker.internal:host-gateway"
@@ -388,6 +389,12 @@ def main() -> int:
         default=None,
         help="Inject a reusable task image using this latest/ISO-date tag (default: disabled)",
     )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help="Limit task-image injection to manifest.selected_tasks when present",
+    )
     args = parser.parse_args()
 
     compose_changed = ensure_host_gateway_compose(args.tasks_path)
@@ -407,6 +414,7 @@ def main() -> int:
         image_changed = inject_task_docker_images(
             args.tasks_path,
             tag=args.task_image_tag,
+            include_tasks=selected_tasks_from_manifest(args.manifest),
         )
         summary += f" task_image_changed={image_changed}"
     print(summary)

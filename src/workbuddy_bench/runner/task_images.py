@@ -299,12 +299,17 @@ def inject_task_docker_images(
     *,
     tag: str = DEFAULT_TASK_IMAGE_TAG,
     namespace: str | None = None,
+    include_tasks: Iterable[str] | None = None,
 ) -> int:
     """Inject resolved ``environment.docker_image`` values into staged tasks."""
 
     changed = 0
     for image in resolve_task_images(
-        tasks_path, tag=tag, namespace=namespace, compute_source_hash=False
+        tasks_path,
+        tag=tag,
+        namespace=namespace,
+        include_tasks=include_tasks,
+        compute_source_hash=False,
     ):
         toml_path = image.task_dir / "task.toml"
         original = toml_path.read_text()
@@ -451,7 +456,9 @@ def ensure_task_images_available(
     return ready, built
 
 
-def _selected_tasks_from_manifest(path: Path | None) -> list[str] | None:
+def selected_tasks_from_manifest(path: Path | None) -> list[str] | None:
+    """Return a manifest's concrete task subset, or ``None`` for all tasks."""
+
     if path is None:
         return None
     data = json.loads(path.read_text())
@@ -486,7 +493,7 @@ def main() -> int:
             include_tasks=(
                 args.include_task
                 if args.include_task
-                else _selected_tasks_from_manifest(args.manifest)
+                else selected_tasks_from_manifest(args.manifest)
             ),
         )
         if args.command == "list":

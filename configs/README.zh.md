@@ -184,8 +184,9 @@ environment_override:
 ```
 
 `NO_FORCE_BUILD=1` 是单次运行的等价开关。显式提供 task-image tag 时，
-`prepare_tasks` 才向副本里的每个 `task.toml` 注入
-`[environment].docker_image`；没有 tag 就不注入，原始 dataset 始终不会被修改。当
+`prepare_tasks` 只向 resolved manifest 选中的任务副本注入
+`[environment].docker_image`；没有任务子集时才处理全部任务。没有 tag 就不注入，
+原始 dataset 始终不会被修改。当
 `force_build=true` 且存在 Dockerfile 时，Harbor 会忽略已注入的引用。runner 不会为了
 注入而解析或覆盖 `force_build`，也不会自动 preflight 或构建 task 镜像。当
 `force_build=false` 且镜像缺失时，环境启动会失败（Compose 可能先按默认策略尝试从

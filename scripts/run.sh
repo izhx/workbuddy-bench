@@ -529,7 +529,9 @@ eval "$_USER_VARS"
 prep_cmd=(python3 -m workbuddy_bench.runner.prepare_tasks "$EFFECTIVE_TASKS_DIR")
 [ -n "$AGENT_USER" ] && prep_cmd+=(--agent-user "$AGENT_USER")
 [ -n "$VERIFIER_USER" ] && prep_cmd+=(--verifier-user "$VERIFIER_USER")
-[ -n "$RESOLVED_TASK_IMAGE_TAG" ] && prep_cmd+=(--task-image-tag "$RESOLVED_TASK_IMAGE_TAG")
+if [ -n "$RESOLVED_TASK_IMAGE_TAG" ]; then
+    prep_cmd+=(--task-image-tag "$RESOLVED_TASK_IMAGE_TAG" --manifest "$MANIFEST_PATH")
+fi
 "${prep_cmd[@]}"
 
 if [ "${SHARDS:-1}" -gt 1 ] || [ "${HAS_TASK_SELECTION:-0}" -ne 0 ]; then

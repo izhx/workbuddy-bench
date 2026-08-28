@@ -198,8 +198,9 @@ environment_override:
 ```
 
 `NO_FORCE_BUILD=1` is the one-run equivalent. When an explicit task-image tag is
-present, `prepare_tasks` injects `[environment].docker_image` into each copied
-`task.toml`; source datasets are not edited. Without a tag, nothing is injected.
+present, `prepare_tasks` injects `[environment].docker_image` into the copied
+tasks selected by the resolved manifest (or every copied task when there is no
+selection); source datasets are not edited. Without a tag, nothing is injected.
 Harbor ignores an injected reference when `force_build=true` and a Dockerfile
 exists. The runner neither resolves nor overrides `force_build` for this
 injection, and it does not automatically preflight or build task images. With

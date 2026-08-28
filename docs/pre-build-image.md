@@ -177,6 +177,7 @@ NO_FORCE_BUILD=1 scripts/run-jobs.sh \
 ## 运行规则与常见问题
 
 - 未提供 `--task-image-tag` 或 `TASK_IMAGE_TAG`：不注入 `docker_image`，Harbor 仍从 task Dockerfile 构建。
+- job 配置了 `task_selection`：preflight 与运行时注入都只处理 resolved manifest 的 `selected_tasks`。
 - 提供 tag 且 `force_build=false`：Harbor 使用注入的预构建镜像。
 - 提供 tag 但 `force_build=true`，且 task 有 Dockerfile：Harbor 忽略预构建引用并执行构建。
 - `force_build=false` 但本地镜像缺失：Compose 可能尝试从 registry 拉取，失败后终止；不会回退到 Dockerfile 构建。
