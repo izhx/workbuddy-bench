@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tomllib
@@ -131,23 +132,25 @@ def task_environment_source_hash(task_dir: Path) -> str:
     if not environment_dir.is_dir():
         raise FileNotFoundError(f"task environment directory not found: {environment_dir}")
 
-    entries: list[tuple[str, bytes]] = []
+    entries: list[tuple[str, str, int, bytes]] = []
     for path in environment_dir.rglob("*"):
         rel = path.relative_to(environment_dir)
         if _HASH_IGNORE_PARTS & set(rel.parts) or path.name in _HASH_IGNORE_NAMES:
             continue
+        mode = stat.S_IMODE(path.lstat().st_mode)
         if path.is_symlink():
-            entries.append((rel.as_posix(), f"symlink:{path.readlink()}".encode()))
+            entries.append((rel.as_posix(), "symlink", mode, str(path.readlink()).encode()))
         elif path.is_file():
-            entries.append((rel.as_posix(), path.read_bytes()))
+            entries.append((rel.as_posix(), "file", mode, path.read_bytes()))
+        elif path.is_dir():
+            entries.append((rel.as_posix(), "directory", mode, b""))
 
     digest = hashlib.sha256()
-    for relative, content in sorted(entries):
-        relative_bytes = relative.encode()
-        digest.update(len(relative_bytes).to_bytes(8, "big"))
-        digest.update(relative_bytes)
-        digest.update(len(content).to_bytes(8, "big"))
-        digest.update(content)
+    for relative, kind, mode, content in sorted(entries):
+        fields = (relative.encode(), kind.encode(), mode.to_bytes(4, "big"), content)
+        for field in fields:
+            digest.update(len(field).to_bytes(8, "big"))
+            digest.update(field)
     return digest.hexdigest()
 
 
