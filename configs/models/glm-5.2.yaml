@@ -78,7 +78,7 @@ model:
   # OPTIONAL — default inference params. Per-job override:
   # `model_params_override` (deep-merged into this block).
   params:
-    # max_output_tokens: 16384
+    max_output_tokens: 131072  # 最好设置模型自己值。在 claude code 实验会遇到默认32k限制
     # temperature: 0.0
     thinking_enabled: true
     extra_body:                       # provider-specific extras
