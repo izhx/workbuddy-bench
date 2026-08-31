@@ -172,6 +172,27 @@ NO_FORCE_BUILD=1 scripts/run-jobs.sh \
   --task-image-tag 2026-08-27 <job-a> <job-b>
 ```
 
+中断的单个 Harbor 实验也可以在原目录中补齐有效 trial：
+
+```bash
+NO_FORCE_BUILD=1 uv run ./scripts/run.sh \
+  --job <slug> \
+  --task-image-tag 2026-08-27 \
+  --resume-in-place results/<job>/<experiment-dir> \
+  --max-extra-attempts 6
+```
+
+原地恢复只接受一个实验目录，并要求旧实验的有效 Harbor 配置已经是
+`force_build=false`。checksum 匹配且包含 reward 的 trial 会保留（reward 为 `0`
+也有效）；不完整或缺少 reward 的 trial 会先归档到同级
+`<experiment>.attempt-history/`，再在原实验目录
+补相应的 planned slot。`--dry-run` 会打印补跑计划并执行镜像 preflight，不会修改
+实验目录。镜像注入和 preflight 以旧 `lock.json` 的 planned task 为准，不使用当前
+job YAML 中可能已经变化的 task selection。checksum 不匹配会直接失败；它也不会把 reward 为 `0` 的有效评测结果
+反复重跑到通过。
+旧 `config.json` 如果缺少 `job_name`，入口会补成当前实验目录名，并先保存
+`config.json.before-in-place-resume`，确保 Harbor 0.18 仍写入指定目录。
+
 当前 `configs/bench/_default.yaml` 的默认值已经是 `force_build: false`，但在 job 或命令中显式表达复用意图可以避免配置默认值变化带来的歧义。
 
 ## 运行规则与常见问题

@@ -151,6 +151,38 @@ directories, and the old experiment directories are not modified. Invalid
 resume paths fail before run setup. `--dry-run` retains its manifest-only
 behavior and does not calculate how many trials can be reused.
 
+To continue one interrupted Harbor experiment in its original directory, use
+the separate prebuilt-only mode:
+
+```bash
+NO_FORCE_BUILD=1 uv run ./scripts/run.sh \
+  --job <slug> \
+  --task-image-tag 2026-08-27 \
+  --resume-in-place results/<job>/<experiment-dir> \
+  --max-extra-attempts 6
+```
+
+`--resume-in-place` accepts exactly one experiment and cannot be combined with
+`--resume-job` or `SHARDS > 1`. The explicit image tag is required, every task
+in the recorded `lock.json` plan is preflighted, and the Harbor config must already use
+`force_build=false`; an old build-mode experiment is not converted in place.
+The runner keeps trials with a matching checksum and a non-null reward
+(including reward `0`), moves incomplete or reward-less trial directories to the
+sibling `<experiment>.attempt-history/`, then lets Harbor fill only the
+vacated planned slots in the same experiment directory. It repeats until all
+planned slots are valid or the extra-attempt budget is exhausted. The default
+budget is the experiment's total planned trial count. A checksum mismatch stops
+before archiving because an in-place resume cannot change the original job.
+If an older Harbor config omitted `job_name`, the runner adds the experiment
+directory name before the first resume and preserves the original as
+`config.json.before-in-place-resume`; this prevents Harbor 0.18 from choosing
+a fresh timestamp directory.
+
+For this mode, `--dry-run` reconstructs the temporary staged dataset, prints
+the exact keep/archive/run plan, and performs the local task-image preflight,
+but does not move trials or invoke Harbor. This is interruption recovery, not
+retry-until-pass: a completed reward of `0` remains a valid attempt.
+
 Task sandboxes can use explicitly enabled reusable local images named
 `<dataset-id>/<task>:<tag>` (for example,
 `wb-bench-code-v1.0/<task>:2026-08-27`). Reuse has no default tag: first build

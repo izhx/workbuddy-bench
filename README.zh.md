@@ -138,6 +138,36 @@ reward 为 `0` 也算已完成。只有各 resume 目录累计提供的有效 tr
 Harbor 时间戳目录，旧实验目录不会被修改。无效的 resume 路径会在运行准备前直接报错。
 `--dry-run` 仍然只展示 resolved manifest，不会计算可复用的 trial 数量。
 
+如果要在原实验目录中继续一个被中断的 Harbor job，请使用独立的、仅支持预构建镜像的
+原地恢复模式：
+
+```bash
+NO_FORCE_BUILD=1 uv run ./scripts/run.sh \
+  --job <slug> \
+  --task-image-tag 2026-08-27 \
+  --resume-in-place results/<job>/<experiment-dir> \
+  --max-extra-attempts 6
+```
+
+`--resume-in-place` 只能指定一个实验目录，不能与 `--resume-job` 或
+`SHARDS > 1` 同时使用。必须显式提供镜像 tag；入口会以旧 `lock.json` 为准，
+preflight 其中所有 planned task 的镜像，
+而且旧 Harbor 配置本身必须已经是 `force_build=false`，不会把一个原本需要构建的
+旧实验原地转换为预构建模式。
+
+runner 会保留 checksum 匹配且 reward 非空的 trial（reward 为 `0` 也保留），把
+不完整或缺少 reward 的 trial 移到同级的 `<experiment>.attempt-history/`，再让 Harbor 只补
+原计划中腾出的 slot，结果仍写回原实验目录。这个过程会重复到所有 planned slot 都有
+有效结果，或者用完 extra-attempt budget。默认 budget 等于该实验原计划的 trial 总数。
+checksum 不匹配会在归档前直接终止，因为原地恢复不能改变原 job 配置。
+如果旧 Harbor `config.json` 没有保存 `job_name`，runner 会在第一次实际恢复前补成
+当前实验目录名，并把原文件保存为 `config.json.before-in-place-resume`，避免
+Harbor 0.18 重新选择新的时间戳目录。
+
+该模式下，`--dry-run` 会重建临时 staged dataset、打印 keep/archive/run 计划并执行
+本地 task 镜像 preflight，但不会移动 trial，也不会调用 Harbor。这是中断恢复，不是
+retry-until-pass：已经完成但 reward 为 `0` 的结果不会重跑。
+
 task sandbox 可以显式启用可复用的本地镜像，名称为
 `<dataset-id>/<task>:<tag>`（例如
 `wb-bench-code-v1.0/<task>:2026-08-27`）。复用没有默认 tag：必须先构建镜像，
