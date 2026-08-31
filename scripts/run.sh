@@ -72,7 +72,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --resume-job DIR      Reuse completed trials from an existing Harbor job directory"
             echo "                        (repeatable; forces sharded_eval even when SHARDS is unset)"
             echo "  --resume-in-place DIR Resume one Harbor experiment in its original directory"
-            echo "                        until every planned slot has a matching non-null reward"
+            echo "                        until every planned slot has a non-crashed, non-null reward"
             echo "  --max-extra-attempts N"
             echo "                        Bound new in-place attempts (default: total planned trials)"
             echo "  --retry-exception TYPE"

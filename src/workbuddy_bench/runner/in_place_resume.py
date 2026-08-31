@@ -79,6 +79,10 @@ DEFAULT_RETRYABLE_EXCEPTIONS = RETRYABLE_AGENT_EXCEPTIONS | RETRYABLE_INFRA_EXCE
 # ``AgentTimeoutError`` means the agent burned its own wall-clock budget, and
 # the context/output length errors mean the model produced too much. Their
 # rewards grade real behaviour.
+#
+# Documentation only -- ``is_retryable_exception`` does not read this set. Keeping
+# a trial follows from *absence* from the retry policy, so adding a name here
+# changes nothing; to force a type to be kept, pass --keep-exception.
 NON_RETRYABLE_EXCEPTIONS = frozenset(
     {
         "AgentTimeoutError",

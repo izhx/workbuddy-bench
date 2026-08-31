@@ -82,6 +82,7 @@ uv run ./scripts/run.sh \
 | 计划来源 | 原实验 `lock.json` | 当前 job YAML 和 manifest |
 | 部分 attempt | 只补原计划缺口 | 数量不足时整项 task 按当前 `n_attempts` 重跑 |
 | 旧结果呈现 | 有效 trial 留在原处 | 复用 trial 链接到新结果根 |
+| 崩溃 trial | 带 reward 也补跑（见第 7 节） | 只要 reward 非 `null` 即复用 |
 | sharding | 不支持 | 通过 `sharded_eval` 支持 |
 | 镜像策略 | 强制预构建镜像 | 由普通运行参数决定 |
 
@@ -159,7 +160,8 @@ planned_total = 所有 task planned 数量之和
 | 网络或 agent 退出码崩溃（`NetworkConnectionError`、`NonZeroAgentExitCodeError`） | 同上 |
 | 容器与环境故障（`RuntimeError`、`EnvironmentStartTimeoutError`、`OSError` 等） | 同上 |
 | verifier 侧 reward 文件缺失或不可解析 | 同上 |
-| `AgentTimeoutError`、`ContextLengthExceededError`、`OutputLengthExceededError` | 保留；这些是真实评测结果，不是崩溃 |
+| `AgentTimeoutError`、`ContextLengthExceededError`、`OutputLengthExceededError` | 不算崩溃；带非空 reward 时保留，reward 为 `null` 时仍按 `missing_reward` 补跑 |
+| 其他未列出的 exception，带非空 reward | 保留；只有落在可重试集合里的类型才按崩溃处理 |
 | 缺少或损坏 `config.json` | 归档后补跑 |
 | 缺少或损坏 `result.json` | 归档后补跑 |
 | 非空 reward 的 trial checksum 不匹配 | 立即终止，不归档任何 trial |
@@ -179,31 +181,67 @@ planned_total = 所有 task planned 数量之和
 - agent 自己耗尽 wall-clock 预算（`AgentTimeoutError`）或输出超长，是模型行为的一部分，reward 有效，
   不补跑。
 
-默认可重试集合定义在 `in_place_resume.py` 的 `RETRYABLE_AGENT_EXCEPTIONS` 和
-`RETRYABLE_INFRA_EXCEPTIONS`。任何以 `ApiError` 结尾的未见过类型也按崩溃处理，以覆盖 Harbor
-后续新增的 provider 错误子类。
+默认可重试集合是 `in_place_resume.py` 中 `RETRYABLE_AGENT_EXCEPTIONS`（9 个：全部 `ApiError`
+子类、`NonZeroAgentExitCodeError`、`NetworkConnectionError`）与 `RETRYABLE_INFRA_EXCEPTIONS`
+（11 个：`CancelledError`、裸 `RuntimeError`、`OSError`、镜像构建与健康检查失败、各类 setup /
+环境 / verifier 超时、reward 文件缺失或不可解析）的并集，共 20 个类型。
 
-三个命令行开关可以调整该策略，均只在 `--resume-in-place` 下可用：
+同文件中的 `NON_RETRYABLE_EXCEPTIONS` 只是说明性常量，判定逻辑并不读取它：保留的依据是
+“不在可重试集合里”，而不是“出现在这个集合里”。
+
+### 三个调整开关
+
+均只在 `--resume-in-place` 下可用，`run.sh` 与 Python 层各校验一次：
 
 | 开关 | 含义 |
 |---|---|
-| `--retry-exception TYPE` | 追加一个按崩溃处理的 exception 类型，可重复 |
-| `--keep-exception TYPE` | 把某类型当成有效结果保留，可重复；优先于 `--retry-exception` |
-| `--no-retry-crashed` | 退回旧行为，只补跑 reward 缺失和 `CancelledError` |
+| `--retry-exception TYPE` | 在默认集合之外追加一个按崩溃处理的类型，可重复 |
+| `--keep-exception TYPE` | 把某类型当成有效结果保留，可重复 |
+| `--no-retry-crashed` | 把策略收窄为只有 `CancelledError`，等于退回旧行为 |
 
-`--no-retry-crashed` 与 `--retry-exception` 互斥；同一类型同时出现在 `--retry-exception` 和
-`--keep-exception` 会直接报错。dry-run 与实际补跑使用同一组开关，因此打印的计划与真正会归档的
-内容一致。计划输出会额外按 reason 汇总一行，例如：
+`--keep-exception` 在 `is_retryable_exception` 中先于可重试集合检查，因此保留优先于重试。
+
+互斥与校验：
+
+| 情况 | 结果 |
+|---|---|
+| 同一类型同时给 `--retry-exception` 和 `--keep-exception` | 报错退出 |
+| `--no-retry-crashed` 与 `--retry-exception` 同时给 | 报错退出（语义矛盾） |
+| `--no-retry-crashed` 与 `--keep-exception` 同时给 | 允许，但策略已只剩 `CancelledError`，基本无意义 |
+| 三个开关任一、但没有 `--resume-in-place` | 报错退出 |
+
+两个容易踩的点：
+
+- **`--keep-exception` 救不回 reward 为 `null` 的 trial。** 它只影响崩溃判定这一步；判定放过之后，
+  下一个分支仍是 `reward is None → missing_reward`，照样归档。因此对 `CancelledError` 用
+  `--keep-exception` 几乎没有效果，那类 trial 大多本来就没有 reward。
+- **类型名是精确字符串匹配，大小写敏感，不识别继承关系。** 必须写 Harbor 的
+  `type(exception).__name__`，写父类不会覆盖子类。唯一例外是以 `ApiError` 结尾的兜底，用于覆盖
+  Harbor 后续新增的 provider 错误子类；该兜底以 `"ApiError"` 仍在策略内为前提，所以
+  `--no-retry-crashed` 收窄策略后它一并失效，不会被绕过。
+
+dry-run 与实际补跑使用同一组开关，因此打印的计划与真正会归档的内容一致。计划输出会额外按
+reason 汇总一行，例如：
 
 ```text
   archive reasons: cancelled=2 crashed:UnknownApiError=7 missing_reward=3
 ```
 
+想先看清目标目录里有哪些 exception 类型：
+
+```bash
+find results/<job>/<experiment> -mindepth 2 -maxdepth 2 -name result.json -print0 \
+  | xargs -0 -r jq -r '.exception_info.exception_type // "none"' | sort | uniq -c | sort -rn
+```
+
 代码只要求 trial 配置和结果是可读取的 JSON object，并读取恢复所需字段；它不对每个旧文件
 执行完整的 Harbor Pydantic schema 校验。这是有意保留的宽松元数据策略。
 
-只要 result 中存在非 `null` reward 且能够识别 task，checksum 检查优先于归档原因。因此
-即使该 trial 同时缺少 config 或标记为 cancelled，checksum 漂移仍会先终止整个恢复。
+只要 result 中存在非 `null` reward 且能够识别 task，checksum 检查就先于归档原因执行。因此即使
+该 trial 本来就会被归档（缺少 config、标记为 cancelled、或判为崩溃），checksum 漂移仍会先终止
+整个恢复：漂移是数据集级别的问题，不应该被单个 trial 的去留掩盖。
+
+reward 为 `null` 的 trial 不参与 checksum 检查，因为它没有可保留的结果。
 
 ## 8. 补跑循环与 attempt budget
 
@@ -233,9 +271,13 @@ budget 是本次命令中新启动的 trial slot 总数，不是循环轮数。�
 2. 如果新结果有 1 个有效、1 个仍无 reward，下一轮需要 1 个，剩余 budget 为 1，可以再跑。
 3. 如果最后一个仍无 reward，budget 已耗尽，命令失败；不会无限重试。
 
-如果希望允许更多轮，必须显式增大 `--max-extra-attempts`。这仍然只追求“planned slots 都有
-非空 reward”，不会追求“成功满 3 次”。后者会引入按结果选择样本的评分偏差，需要独立的
-评测政策，不能作为中断恢复的隐式行为。
+如果希望允许更多轮，必须显式增大 `--max-extra-attempts`。这只追求“每个 planned slot 都有一个
+**没有崩溃的** 非空 reward”，不会追求“成功满 3 次”。后者会引入按结果选择样本的评分偏差，需要
+独立的评测政策，不能作为中断恢复的隐式行为。
+
+`used` 按每轮的 `attempts_needed` 累加，与新 trial 的结果无关。因此崩溃补跑并不检查根因是否
+已经排除：如果 API 额度尚未恢复、镜像仍然缺失或 Docker 资源仍然耗尽，新 trial 会再次崩溃并
+照样消耗 budget。应先修复根因再补跑。
 
 ## 9. 预构建镜像约束
 
