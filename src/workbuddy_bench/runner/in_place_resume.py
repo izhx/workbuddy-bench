@@ -32,6 +32,83 @@ class ResumeError(RuntimeError):
     """Raised when an in-place resume cannot proceed safely."""
 
 
+# Trials that crashed on the model provider side, the network, or the container
+# runtime never produced a real agent attempt. Harbor still writes a graded
+# ``result.json`` for them, so the verifier reward (usually 0.0) reflects an
+# empty or truncated workspace rather than model behaviour. Keeping such a
+# reward would bias scores downward, so these trials are archived and retried
+# even though a non-null reward is present.
+#
+# Names are Harbor's ``type(exception).__name__`` values; see
+# harbor.agents.installed.base, harbor.trial.errors and harbor.environments.base.
+RETRYABLE_AGENT_EXCEPTIONS = frozenset(
+    {
+        "NonZeroAgentExitCodeError",
+        "ApiError",
+        "ApiRateLimitError",
+        "ApiUsageLimitError",
+        "ApiInternalServerError",
+        "ApiOverloadedError",
+        "ApiConnectionClosedError",
+        "UnknownApiError",
+        "NetworkConnectionError",
+    }
+)
+
+RETRYABLE_INFRA_EXCEPTIONS = frozenset(
+    {
+        "CancelledError",
+        # Bare RuntimeError is what Harbor raises for failed `docker compose`
+        # environment operations.
+        "RuntimeError",
+        "OSError",
+        "SandboxBuildFailedError",
+        "HealthcheckError",
+        "AgentSetupTimeoutError",
+        "EnvironmentStartTimeoutError",
+        "VerifierTimeoutError",
+        "RewardFileNotFoundError",
+        "RewardFileEmptyError",
+        "VerifierOutputParseError",
+    }
+)
+
+DEFAULT_RETRYABLE_EXCEPTIONS = RETRYABLE_AGENT_EXCEPTIONS | RETRYABLE_INFRA_EXCEPTIONS
+
+# Deliberately NOT retried: these are genuine evaluation outcomes, not crashes.
+# ``AgentTimeoutError`` means the agent burned its own wall-clock budget, and
+# the context/output length errors mean the model produced too much. Their
+# rewards grade real behaviour.
+NON_RETRYABLE_EXCEPTIONS = frozenset(
+    {
+        "AgentTimeoutError",
+        "ContextLengthExceededError",
+        "OutputLengthExceededError",
+    }
+)
+
+
+def is_retryable_exception(
+    exception_type: str | None,
+    *,
+    retry_types: frozenset[str] = DEFAULT_RETRYABLE_EXCEPTIONS,
+    keep_types: frozenset[str] = frozenset(),
+) -> bool:
+    """Return True when a trial crashed instead of producing a real attempt."""
+
+    if not exception_type:
+        return False
+    if exception_type in keep_types:
+        return False
+    if exception_type in retry_types:
+        return True
+    # Harbor may add further ApiError subclasses; treat unseen provider errors as
+    # crashes rather than silently scoring them as agent failures. Gated on the
+    # base class still being in the policy, so a caller that narrows the policy
+    # (e.g. --no-retry-crashed) is not overridden by the heuristic.
+    return "ApiError" in retry_types and exception_type.endswith("ApiError")
+
+
 @dataclass(frozen=True)
 class BootstrapInfo:
     job_dir: Path
@@ -379,6 +456,8 @@ def build_resume_plan(
     *,
     planned_by_task: dict[str, int],
     current_tasks: dict[str, dict[str, object]],
+    retry_exceptions: frozenset[str] = DEFAULT_RETRYABLE_EXCEPTIONS,
+    keep_exceptions: frozenset[str] = frozenset(),
 ) -> ResumePlan:
     valid: Counter[str] = Counter()
     seen: Counter[str] = Counter()
@@ -449,6 +528,9 @@ def build_resume_plan(
                 else None
             )
             reward = rewards.get("reward") if isinstance(rewards, dict) else None
+            # Checksum drift is a dataset-wide problem, so it still aborts the
+            # whole resume before any archiving, even for a trial that would be
+            # retried anyway.
             if (
                 task_name != "<unknown>"
                 and reward is not None
@@ -461,8 +543,19 @@ def build_resume_plan(
             if not reason:
                 if task_name == "<unknown>":
                     reason = "unknown_task"
-                elif exception_type == "CancelledError":
-                    reason = "cancelled"
+                elif is_retryable_exception(
+                    exception_type,
+                    retry_types=retry_exceptions,
+                    keep_types=keep_exceptions,
+                ):
+                    # A crashed trial is archived even when it carries a reward:
+                    # that reward grades an empty or truncated workspace rather
+                    # than model behaviour.
+                    reason = (
+                        "cancelled"
+                        if exception_type == "CancelledError"
+                        else f"crashed:{exception_type}"
+                    )
                 elif reward is None:
                     reason = "missing_reward"
 
@@ -499,6 +592,12 @@ def _print_plan(plan: ResumePlan, *, used: int, budget: int) -> None:
         f"attempts_needed={plan.attempts_needed} "
         f"extra_attempts_used={used}/{budget}"
     )
+    reason_counts = Counter(item.reason for item in plan.invalid_trials)
+    if reason_counts:
+        print(
+            "  archive reasons: "
+            + " ".join(f"{reason}={count}" for reason, count in sorted(reason_counts.items()))
+        )
     invalid_by_task: Counter[str] = Counter(item.task_name for item in plan.invalid_trials)
     for task_name, target in plan.planned_by_task.items():
         valid = plan.valid_by_task[task_name]
@@ -561,6 +660,8 @@ def run_in_place_resume(
     task_image_tag: str,
     max_extra_attempts: int | None = None,
     dry_run: bool = False,
+    retry_exceptions: frozenset[str] = DEFAULT_RETRYABLE_EXCEPTIONS,
+    keep_exceptions: frozenset[str] = frozenset(),
     harbor_runner: HarborRunner = _default_harbor_runner,
 ) -> int:
     resolved, config, lock = _job_files(job_dir)
@@ -584,6 +685,8 @@ def run_in_place_resume(
             resolved,
             planned_by_task=planned,
             current_tasks=current_tasks,
+            retry_exceptions=retry_exceptions,
+            keep_exceptions=keep_exceptions,
         )
         _print_plan(plan, used=used, budget=budget)
         if needs_job_name:
@@ -651,8 +754,52 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Maximum new trial attempts; default is the job's total planned trials.",
     )
+    run.add_argument(
+        "--retry-exception",
+        action="append",
+        default=[],
+        metavar="TYPE",
+        help=(
+            "Additional Harbor exception_type to treat as a crash and retry even "
+            "when the trial carries a reward. Repeatable."
+        ),
+    )
+    run.add_argument(
+        "--keep-exception",
+        action="append",
+        default=[],
+        metavar="TYPE",
+        help=(
+            "Harbor exception_type to keep as a valid result instead of retrying "
+            "it, e.g. --keep-exception UnknownApiError. Repeatable; wins over "
+            "--retry-exception."
+        ),
+    )
+    run.add_argument(
+        "--no-retry-crashed",
+        action="store_true",
+        help=(
+            "Only retry trials with a missing reward. Keeps API, network and "
+            "container crashes that already carry a reward."
+        ),
+    )
     run.add_argument("--dry-run", action="store_true")
     return parser
+
+
+def _resolve_exception_policy(args: argparse.Namespace) -> tuple[frozenset[str], frozenset[str]]:
+    keep = frozenset(args.keep_exception or ())
+    if args.no_retry_crashed:
+        if args.retry_exception:
+            raise ResumeError("--no-retry-crashed cannot be combined with --retry-exception")
+        # CancelledError has no usable reward anyway; keep archiving it.
+        return frozenset({"CancelledError"}), keep
+    conflicting = sorted(keep & frozenset(args.retry_exception or ()))
+    if conflicting:
+        raise ResumeError(
+            f"exception type(s) passed to both --retry-exception and --keep-exception: {conflicting}"
+        )
+    return DEFAULT_RETRYABLE_EXCEPTIONS | frozenset(args.retry_exception or ()), keep
 
 
 def main() -> int:
@@ -680,12 +827,15 @@ def main() -> int:
                     )
                 )
             return 0
+        retry_exceptions, keep_exceptions = _resolve_exception_policy(args)
         return run_in_place_resume(
             args.job_dir,
             args.tasks_dir,
             task_image_tag=args.task_image_tag,
             max_extra_attempts=args.max_extra_attempts,
             dry_run=args.dry_run,
+            retry_exceptions=retry_exceptions,
+            keep_exceptions=keep_exceptions,
         )
     except ResumeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

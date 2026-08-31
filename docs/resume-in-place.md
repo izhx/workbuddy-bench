@@ -22,7 +22,12 @@ results/<job>/<experiment-dir>/
 - 没有 `result.json`；
 - `result.json` 损坏；
 - 被取消；
-- verifier 没有写出 reward。
+- verifier 没有写出 reward；
+- agent 因模型 API、网络或容器故障崩溃，**即使 Harbor 已经写出了一个 reward**。
+
+最后一类值得单独说明。agent 进程崩溃时 Harbor 仍会照常调用 verifier，于是 trial 里会留下一个
+非空 reward（通常是 `0.0`，也可能是部分得分）。那个 reward 评的是一个空的或被截断的 workspace，
+不是模型行为。把它当成有效结果会让分数系统性偏低，所以这类 trial 默认会被归档补跑。
 
 原实验 `lock.json` 中的 planned trials 是最终目标。runner 保留已经有效的 trial，移走
 无效 trial，再使用 Harbor 原生的 `harbor job resume --job-path` 补回空出的 planned slot。
@@ -63,6 +68,10 @@ uv run ./scripts/run.sh \
 
 `--max-extra-attempts N` 限制本次命令最多新启动多少个 trial。未指定时，默认 budget
 等于旧实验 planned trial 总数。`N` 可以是 `0`，此时只允许已经完整的实验成功结束。
+
+注意默认会把 API/网络/容器崩溃的 trial 也算进 `attempts_needed`，即使它们已经带有 reward。
+这类 trial 往往数量不小，建议先 dry-run 看清 budget 需求，再决定 `--max-extra-attempts`。
+崩溃判定的完整规则和相关开关见第 7 节。
 
 ## 3. 与 `--resume-job` 的区别
 
@@ -133,7 +142,7 @@ planned_total = 所有 task planned 数量之和
 1. trial 目录可识别；
 2. `config.json` 存在、是合法 JSON object；
 3. `result.json` 存在、是合法 JSON object；
-4. `exception_info.exception_type` 不是 `CancelledError`；
+4. `exception_info.exception_type` 不属于可重试崩溃集合（见下）；
 5. `verifier_result.rewards.reward` 存在且不为 `null`；
 6. `task_checksum` 与当前准备后的 task checksum 一致。
 
@@ -141,14 +150,18 @@ planned_total = 所有 task planned 数量之和
 
 | trial 状态 | 行为 |
 |---|---|
-| reward 为正数 | checksum 匹配时保留 |
-| reward 为 `0` | checksum 匹配时保留 |
-| reward 为其他非 `null` JSON 值 | checksum 匹配时保留；当前宽松解析不额外限制类型 |
-| reward 缺失或为 `null` | 归档后补跑 |
-| `CancelledError` | checksum 未漂移时，即使带有 reward 也归档后补跑 |
+| 无 exception，reward 为正数 | checksum 匹配时保留 |
+| 无 exception，reward 为 `0` | checksum 匹配时保留 |
+| 无 exception，reward 为其他非 `null` JSON 值 | checksum 匹配时保留；当前宽松解析不额外限制类型 |
+| reward 缺失或为 `null` | 归档后补跑，reason `missing_reward` |
+| `CancelledError` | 归档后补跑，reason `cancelled` |
+| 模型 API 崩溃（`UnknownApiError`、`ApiRateLimitError` 等） | 即使带有 reward 也归档后补跑，reason `crashed:<type>` |
+| 网络或 agent 退出码崩溃（`NetworkConnectionError`、`NonZeroAgentExitCodeError`） | 同上 |
+| 容器与环境故障（`RuntimeError`、`EnvironmentStartTimeoutError`、`OSError` 等） | 同上 |
+| verifier 侧 reward 文件缺失或不可解析 | 同上 |
+| `AgentTimeoutError`、`ContextLengthExceededError`、`OutputLengthExceededError` | 保留；这些是真实评测结果，不是崩溃 |
 | 缺少或损坏 `config.json` | 归档后补跑 |
 | 缺少或损坏 `result.json` | 归档后补跑 |
-| 非 `CancelledError`，同时存在 reward | 配置可读且 checksum 匹配时，当前代码不因该 exception 自动判无效 |
 | 非空 reward 的 trial checksum 不匹配 | 立即终止，不归档任何 trial |
 | trial 对应的 task 不在旧计划中 | 立即终止 |
 | trial 目录数或某个 task 的 trial 数超过计划 | 立即终止 |
@@ -156,6 +169,35 @@ planned_total = 所有 task planned 数量之和
 
 这里的“有效”表示已有一个可计入评测的 reward，不表示 task 成功。reward `0` 是完整评测结果，
 不会为了获得 reward `1` 被反复重跑。
+
+### 崩溃与真实失败的界线
+
+判定的依据是**这一次 attempt 有没有真的跑起来**，不是 reward 高低：
+
+- agent 因为模型 API 报错、网络中断或容器起不来而崩掉时，Harbor 仍会跑 verifier 并写出 reward。
+  这个 reward 评的是空 workspace，保留它等于把基础设施故障计成模型失败。这类 trial 会补跑。
+- agent 自己耗尽 wall-clock 预算（`AgentTimeoutError`）或输出超长，是模型行为的一部分，reward 有效，
+  不补跑。
+
+默认可重试集合定义在 `in_place_resume.py` 的 `RETRYABLE_AGENT_EXCEPTIONS` 和
+`RETRYABLE_INFRA_EXCEPTIONS`。任何以 `ApiError` 结尾的未见过类型也按崩溃处理，以覆盖 Harbor
+后续新增的 provider 错误子类。
+
+三个命令行开关可以调整该策略，均只在 `--resume-in-place` 下可用：
+
+| 开关 | 含义 |
+|---|---|
+| `--retry-exception TYPE` | 追加一个按崩溃处理的 exception 类型，可重复 |
+| `--keep-exception TYPE` | 把某类型当成有效结果保留，可重复；优先于 `--retry-exception` |
+| `--no-retry-crashed` | 退回旧行为，只补跑 reward 缺失和 `CancelledError` |
+
+`--no-retry-crashed` 与 `--retry-exception` 互斥；同一类型同时出现在 `--retry-exception` 和
+`--keep-exception` 会直接报错。dry-run 与实际补跑使用同一组开关，因此打印的计划与真正会归档的
+内容一致。计划输出会额外按 reason 汇总一行，例如：
+
+```text
+  archive reasons: cancelled=2 crashed:UnknownApiError=7 missing_reward=3
+```
 
 代码只要求 trial 配置和结果是可读取的 JSON object，并读取恢复所需字段；它不对每个旧文件
 执行完整的 Harbor Pydantic schema 校验。这是有意保留的宽松元数据策略。
@@ -376,9 +418,10 @@ run_post_judge --manifest <manifest> --job-dir <exact-experiment>
 ```text
 In-place resume plan: planned=3 valid=1 invalid_to_archive=2 \
 attempts_needed=2 extra_attempts_used=0/3
+  archive reasons: crashed:UnknownApiError=1 missing_reward=1
   task-a: valid=1/3 invalid=2 missing=0
   archive task-a__trial-2: missing_reward
-  archive task-a__trial-3: cancelled
+  archive task-a__trial-3: crashed:UnknownApiError
 ```
 
 内部 runner 的主要退出语义：
@@ -399,6 +442,19 @@ jq -r '.trials[].task | (.name // (.path | split("/")[-1]))' \
   results/<job>/<experiment>/lock.json \
   | sort | uniq -c
 ```
+
+按 exception 类型和 reward 有无交叉统计现有 trial，用来预估这次会补跑多少：
+
+```bash
+find results/<job>/<experiment> -mindepth 2 -maxdepth 2 -name result.json -print0 \
+  | xargs -0 -r jq -r \
+      '[(.exception_info.exception_type // "none"), \
+        (if .verifier_result.rewards.reward == null then "null" else "has_reward" end)] \
+       | @tsv' \
+  | sort | uniq -c | sort -rn
+```
+
+`has_reward` 且 exception 为 `UnknownApiError` 一类的行，就是旧规则会静默计入、新规则会补跑的部分。
 
 查看当前非空 reward：
 
@@ -427,6 +483,11 @@ jq . results/<job>/<experiment>.attempt-history/attempt-history.jsonl
 - 不支持“直到成功 N 次”的评测政策。
 - 归档和 `job_name` 写入不是跨文件事务。
 - 不会自动清理 attempt history 或 lock 文件。
-- 当前实现已有针对 trial 判定、budget、归档、CLI 约束和精确 post-judge 的 focused tests，
-  但尚未使用真实 benchmark 任务完成一次端到端原地恢复。因此生产运行前必须先对目标目录
-  执行 dry-run，并建议保留文件系统快照或可恢复备份。
+- 崩溃判定基于 Harbor 的 `exception_type` 字符串，而不是异常类的继承关系；Harbor 若重命名
+  异常类型，需要同步更新 `RETRYABLE_*` 集合（以 `ApiError` 结尾的兜底只覆盖 provider 错误）。
+- 崩溃 trial 的补跑不区分故障原因是否已经排除。API 额度未恢复或镜像仍然缺失时，补跑会再次
+  崩溃并消耗 budget，因此应先修复根因再补跑。
+- 当前实现已有针对 trial 判定、崩溃重试策略、budget、归档、CLI 约束和精确 post-judge 的
+  focused tests（`tests/test_in_place_resume_retry.py` 覆盖崩溃判定），但尚未使用真实
+  benchmark 任务完成一次端到端原地恢复。因此生产运行前必须先对目标目录执行 dry-run，
+  并建议保留文件系统快照或可恢复备份。

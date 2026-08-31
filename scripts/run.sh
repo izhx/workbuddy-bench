@@ -29,6 +29,9 @@ TASK_IMAGE_TAG_CLI=""
 RESUME_JOBS=()
 RESUME_IN_PLACE=""
 MAX_EXTRA_ATTEMPTS=""
+RETRY_EXCEPTIONS=()
+KEEP_EXCEPTIONS=()
+NO_RETRY_CRASHED=0
 while [[ $# -gt 0 ]]; do
     case $1 in
         --job)     JOB_SLUG="$2"; shift 2;;
@@ -49,11 +52,21 @@ while [[ $# -gt 0 ]]; do
             [ "$#" -ge 2 ] || { echo "ERROR: --max-extra-attempts requires a number." >&2; exit 1; }
             MAX_EXTRA_ATTEMPTS="$2"
             shift 2;;
+        --retry-exception)
+            [ "$#" -ge 2 ] || { echo "ERROR: --retry-exception requires a type name." >&2; exit 1; }
+            RETRY_EXCEPTIONS+=("$2")
+            shift 2;;
+        --keep-exception)
+            [ "$#" -ge 2 ] || { echo "ERROR: --keep-exception requires a type name." >&2; exit 1; }
+            KEEP_EXCEPTIONS+=("$2")
+            shift 2;;
+        --no-retry-crashed) NO_RETRY_CRASHED=1; shift;;
         --dry-run) DRY_RUN=1; shift;;
         --help|-h)
             echo "Usage: $0 --job <slug> [--task-image-tag latest|YYYY-MM-DD]"
             echo "          [--resume-job <dir>]... [--resume-in-place <dir>]"
-            echo "          [--max-extra-attempts N] [--dry-run]"
+            echo "          [--max-extra-attempts N] [--retry-exception TYPE]..."
+            echo "          [--keep-exception TYPE]... [--no-retry-crashed] [--dry-run]"
             echo ""
             echo "Options:"
             echo "  --resume-job DIR      Reuse completed trials from an existing Harbor job directory"
@@ -62,6 +75,12 @@ while [[ $# -gt 0 ]]; do
             echo "                        until every planned slot has a matching non-null reward"
             echo "  --max-extra-attempts N"
             echo "                        Bound new in-place attempts (default: total planned trials)"
+            echo "  --retry-exception TYPE"
+            echo "                        Also retry this Harbor exception_type (repeatable)."
+            echo "                        API/network/container crashes are retried by default"
+            echo "                        even when the crashed trial already carries a reward"
+            echo "  --keep-exception TYPE Keep this exception_type as a valid result (repeatable)"
+            echo "  --no-retry-crashed    Only retry trials with a missing reward (old behaviour)"
             echo ""
             echo "Jobs (from configs/jobs/, excluding _template*):"
             ls configs/jobs/*.yaml 2>/dev/null \
@@ -140,6 +159,16 @@ done
 # In-place resume is one exact Harbor job, not the cross-job sharded reuse mode.
 if [ -n "$RESUME_IN_PLACE" ] && [ "${#RESUME_JOBS[@]}" -gt 0 ]; then
     echo "ERROR: --resume-in-place and --resume-job are mutually exclusive." >&2
+    exit 1
+fi
+if [ -z "$RESUME_IN_PLACE" ] \
+    && { [ "${#RETRY_EXCEPTIONS[@]}" -gt 0 ] || [ "${#KEEP_EXCEPTIONS[@]}" -gt 0 ] \
+        || [ "$NO_RETRY_CRASHED" = "1" ]; }; then
+    echo "ERROR: --retry-exception/--keep-exception/--no-retry-crashed require --resume-in-place." >&2
+    exit 1
+fi
+if [ "$NO_RETRY_CRASHED" = "1" ] && [ "${#RETRY_EXCEPTIONS[@]}" -gt 0 ]; then
+    echo "ERROR: --no-retry-crashed cannot be combined with --retry-exception." >&2
     exit 1
 fi
 if [ -n "$MAX_EXTRA_ATTEMPTS" ] && [ -z "$RESUME_IN_PLACE" ]; then
@@ -486,6 +515,17 @@ prepare_effective_tasks() {
     TASKS_PREPARED=1
 }
 
+# Retry-policy flags shared by the dry-run plan and the real resume, so the
+# printed plan matches what the resume will actually archive.
+RESUME_POLICY_FLAGS=()
+for exception_type in "${RETRY_EXCEPTIONS[@]+"${RETRY_EXCEPTIONS[@]}"}"; do
+    RESUME_POLICY_FLAGS+=(--retry-exception "$exception_type")
+done
+for exception_type in "${KEEP_EXCEPTIONS[@]+"${KEEP_EXCEPTIONS[@]}"}"; do
+    RESUME_POLICY_FLAGS+=(--keep-exception "$exception_type")
+done
+[ "$NO_RETRY_CRASHED" != "1" ] || RESUME_POLICY_FLAGS+=(--no-retry-crashed)
+
 if [ -n "$RESUME_IN_PLACE" ]; then
     prepare_effective_tasks
     resume_plan_cmd=(python3 -m workbuddy_bench.runner.in_place_resume run \
@@ -494,6 +534,7 @@ if [ -n "$RESUME_IN_PLACE" ]; then
         --task-image-tag "$RESOLVED_TASK_IMAGE_TAG" \
         --dry-run)
     [ -z "$MAX_EXTRA_ATTEMPTS" ] || resume_plan_cmd+=(--max-extra-attempts "$MAX_EXTRA_ATTEMPTS")
+    resume_plan_cmd+=("${RESUME_POLICY_FLAGS[@]+"${RESUME_POLICY_FLAGS[@]}"}")
     "${resume_plan_cmd[@]}"
     python3 -m workbuddy_bench.runner.task_images preflight \
         "$EFFECTIVE_TASKS_DIR" --tag "$RESOLVED_TASK_IMAGE_TAG" --manifest "$TASK_IMAGE_MANIFEST"
@@ -726,6 +767,7 @@ if [ -n "$RESUME_IN_PLACE" ]; then
         --tasks-dir "$EFFECTIVE_TASKS_DIR" \
         --task-image-tag "$RESOLVED_TASK_IMAGE_TAG")
     [ -z "$MAX_EXTRA_ATTEMPTS" ] || resume_cmd+=(--max-extra-attempts "$MAX_EXTRA_ATTEMPTS")
+    resume_cmd+=("${RESUME_POLICY_FLAGS[@]+"${RESUME_POLICY_FLAGS[@]}"}")
     "${resume_cmd[@]}"
 
     # Judge exactly this Harbor experiment. Do not scan sibling timestamp dirs.
