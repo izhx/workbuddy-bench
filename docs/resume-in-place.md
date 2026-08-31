@@ -488,6 +488,7 @@ jq . results/<job>/<experiment>.attempt-history/attempt-history.jsonl
 - 崩溃 trial 的补跑不区分故障原因是否已经排除。API 额度未恢复或镜像仍然缺失时，补跑会再次
   崩溃并消耗 budget，因此应先修复根因再补跑。
 - 当前实现已有针对 trial 判定、崩溃重试策略、budget、归档、CLI 约束和精确 post-judge 的
-  focused tests（`tests/test_in_place_resume_retry.py` 覆盖崩溃判定），但尚未使用真实
+  focused tests（`src/workbuddy_bench/runner/tests/test_in_place_resume_retry.py`
+  覆盖崩溃判定），但尚未使用真实
   benchmark 任务完成一次端到端原地恢复。因此生产运行前必须先对目标目录执行 dry-run，
   并建议保留文件系统快照或可恢复备份。
