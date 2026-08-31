@@ -75,21 +75,11 @@ RETRYABLE_INFRA_EXCEPTIONS = frozenset(
 
 DEFAULT_RETRYABLE_EXCEPTIONS = RETRYABLE_AGENT_EXCEPTIONS | RETRYABLE_INFRA_EXCEPTIONS
 
-# Deliberately NOT retried: these are genuine evaluation outcomes, not crashes.
-# ``AgentTimeoutError`` means the agent burned its own wall-clock budget, and
-# the context/output length errors mean the model produced too much. Their
-# rewards grade real behaviour.
-#
-# Documentation only -- ``is_retryable_exception`` does not read this set. Keeping
-# a trial follows from *absence* from the retry policy, so adding a name here
-# changes nothing; to force a type to be kept, pass --keep-exception.
-NON_RETRYABLE_EXCEPTIONS = frozenset(
-    {
-        "AgentTimeoutError",
-        "ContextLengthExceededError",
-        "OutputLengthExceededError",
-    }
-)
+# Notably absent, and deliberately so: ``AgentTimeoutError`` (the agent burned its
+# own wall-clock budget) plus ``ContextLengthExceededError`` and
+# ``OutputLengthExceededError`` (the model produced too much). Those are genuine
+# evaluation outcomes, so their rewards stand. Keeping a trial follows from a type
+# being absent from the policy above; there is no separate keep-list to extend.
 
 
 def is_retryable_exception(

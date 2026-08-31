@@ -186,8 +186,8 @@ planned_total = 所有 task planned 数量之和
 （11 个：`CancelledError`、裸 `RuntimeError`、`OSError`、镜像构建与健康检查失败、各类 setup /
 环境 / verifier 超时、reward 文件缺失或不可解析）的并集，共 20 个类型。
 
-同文件中的 `NON_RETRYABLE_EXCEPTIONS` 只是说明性常量，判定逻辑并不读取它：保留的依据是
-“不在可重试集合里”，而不是“出现在这个集合里”。
+代码中没有对应的“保留集合”。保留的依据是某个类型**不在**上述可重试集合里，而不是它出现在
+另一个白名单里。因此想让某类型被保留，只能用 `--keep-exception`，没有可以追加名字的常量。
 
 ### 三个调整开关
 
