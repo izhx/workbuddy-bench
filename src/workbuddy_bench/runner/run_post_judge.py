@@ -12,6 +12,8 @@ in every case — nothing hardcoded.
 
    Uses the resolved manifest (slug + proxy routing). Must run while the
    job-private proxy is still alive (before run.sh's EXIT trap tears it down).
+   In-place resume passes --job-dir instead of --runtime-config so only that
+   exact experiment is judged rather than every sibling under jobs_dir.
 
 2. Standalone (post-hoc, judge already-finished result dirs)::
 
@@ -67,7 +69,12 @@ def _job_root_from_runtime_config(runtime_config: Path) -> Path:
 
 
 # 1. Automatic path (manifest + runtime config)
-def run_post_judge(manifest_path: Path, runtime_config: Path) -> int:
+def run_post_judge(
+    manifest_path: Path,
+    runtime_config: Path | None = None,
+    *,
+    job_dirs: list[Path] | None = None,
+) -> int:
     manifest = json.loads(manifest_path.read_text())
     judge = manifest.get("llm_judge") or {}
     if not judge.get("enabled"):
@@ -80,11 +87,22 @@ def run_post_judge(manifest_path: Path, runtime_config: Path) -> int:
         )
         return 0
 
-    job_root = _job_root_from_runtime_config(runtime_config)
-    job_dirs = find_harbor_job_dirs(job_root)
-    if not job_dirs:
-        print(f"[post-judge] No Harbor job dirs found under {job_root}; skipping.")
-        return 0
+    if job_dirs is None:
+        if runtime_config is None:
+            raise ValueError("runtime_config is required when job_dirs is not provided")
+        job_root = _job_root_from_runtime_config(runtime_config)
+        job_dirs = find_harbor_job_dirs(job_root)
+        if not job_dirs:
+            print(f"[post-judge] No Harbor job dirs found under {job_root}; skipping.")
+            return 0
+    else:
+        job_dirs = [path.resolve() for path in job_dirs]
+        missing = [path for path in job_dirs if not path.is_dir()]
+        if missing:
+            raise FileNotFoundError(
+                "explicit Harbor job dir(s) not found: "
+                + ", ".join(str(path) for path in missing)
+            )
 
     backend = backend_from_manifest_data(manifest)
     return _judge_dirs(backend, job_dirs, write_back=True)
@@ -154,6 +172,13 @@ def main() -> int:
         "--runtime-config", type=Path, help="Generated runtime job YAML (automatic path)."
     )
     parser.add_argument(
+        "--job-dir",
+        action="append",
+        type=Path,
+        default=[],
+        help="Judge this exact Harbor job directory with --manifest; repeatable.",
+    )
+    parser.add_argument(
         "--job-config", type=Path, help="configs/jobs/<job>.yaml (standalone path)."
     )
     parser.add_argument(
@@ -198,8 +223,12 @@ def main() -> int:
         print(f"{slug} {enabled}")
         return 0
 
-    if args.manifest and args.runtime_config:
-        rc = run_post_judge(args.manifest, args.runtime_config)
+    if args.manifest and (args.runtime_config or args.job_dir):
+        rc = run_post_judge(
+            args.manifest,
+            args.runtime_config,
+            job_dirs=args.job_dir or None,
+        )
     elif args.job_config and args.jobs:
         try:
             rc = run_standalone(
@@ -212,7 +241,7 @@ def main() -> int:
             return 1
     else:
         parser.error(
-            "provide either (--manifest + --runtime-config) for the automatic "
+            "provide either (--manifest + --runtime-config/--job-dir) for the automatic "
             "path, or (--job-config + --jobs) for the standalone post-hoc path."
         )
 

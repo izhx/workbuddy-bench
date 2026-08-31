@@ -1,12 +1,13 @@
 ---
 name: wbb-run-prebuilt
-description: Launch one or more WorkBuddy Bench jobs with already-prebuilt task images. Use when a run must reuse local task images under one explicit shared tag, with exact task-selection preflight, no task image builds, and human-readable command output saved under results.
+description: Launch or resume WorkBuddy Bench jobs with already-prebuilt task images. Use when a run must reuse local task images under one explicit shared tag, with exact task-selection preflight, no task image builds, optional completed-trial reuse from existing Harbor job directories, and human-readable command output saved under results.
 ---
 
 # Run WBB with Prebuilt Images
 
 Launch one or more job slugs from `configs/jobs/` using an explicit task image
-tag. Work from the WorkBuddy Bench repository root.
+tag, optionally resuming completed trials from an interrupted run. Work from the
+WorkBuddy Bench repository root.
 
 ## Required inputs
 
@@ -21,6 +22,17 @@ If different jobs need different tags, treat them as separate launches. Prefer
 a date tag for stable local reuse; `latest` is mutable and Docker Compose may
 apply its normal registry pull behavior to it.
 
+For a resume, additionally require one or more exact existing Harbor experiment
+directories for one job. Accept repository-relative or absolute paths and never
+infer them from the job slug. Use the same explicit image tag as the interrupted
+run: changing the injected image reference can change the task checksum and
+make otherwise completed trials ineligible for reuse.
+
+Resume one job at a time. Multiple `--resume-job` directories for that one job
+are supported and their eligible attempts accumulate. If several jobs need
+resuming, treat each job and its resume directories as a separate launch;
+`scripts/run-jobs.sh` has no job-to-resume-directory mapping.
+
 ## Resolve and preflight every job
 
 Before the real launch, resolve each job independently with the required tag:
@@ -28,6 +40,17 @@ Before the real launch, resolve each job independently with the required tag:
 ```bash
 uv run ./scripts/run.sh --job <job-slug> \
   --task-image-tag <tag> --dry-run
+```
+
+For a resume, pass every resume directory to this dry-run as well so the entry
+point validates the paths before any runtime setup:
+
+```bash
+uv run ./scripts/run.sh --job <job-slug> \
+  --task-image-tag <tag> \
+  --resume-job <experiment-dir-a> \
+  --resume-job <experiment-dir-b> \
+  --dry-run
 ```
 
 Record the `Manifest: .../manifest.json` path printed by each dry-run. The
@@ -50,6 +73,9 @@ silently building them.
 
 The task-image preflight is separate from `run.sh --dry-run`; the latter resolves
 configuration and task selection but does not validate reusable task images.
+It also does not calculate resume eligibility or the number of reusable trials.
+Preflight every selected task image even for a resume, so a checksum mismatch or
+insufficient attempt count cannot cause an un-preflighted task to run.
 
 ## Launch with reuse forced for this invocation
 
@@ -70,7 +96,33 @@ NO_FORCE_BUILD=1 uv run ./scripts/run.sh \
   2>&1 | tee -a "$RUN_LOG"
 ```
 
-For multiple jobs, preserve the requested order:
+For one resumed job, pass all old experiment directories again and record them
+in the operator log:
+
+```bash
+mkdir -p results
+RUN_LOG="$(pwd)/results/wbb-run-$(date -u +%Y-%m-%dT%H-%M-%SZ)-$$-<job-slug>-resume.log"
+printf 'jobs=%s\ntask_image_tag=%s\nresume_jobs=%s\nlog=%s\n' \
+  '<job-slug>' '<tag>' '<experiment-dir-a> <experiment-dir-b>' "$RUN_LOG" | tee "$RUN_LOG"
+set -o pipefail
+NO_FORCE_BUILD=1 uv run ./scripts/run.sh \
+  --job <job-slug> --task-image-tag <tag> \
+  --resume-job <experiment-dir-a> \
+  --resume-job <experiment-dir-b> \
+  2>&1 | tee -a "$RUN_LOG"
+```
+
+Specifying any `--resume-job` makes `run.sh` use `sharded_eval`; when `SHARDS`
+is unset it passes `--shards 1`. A previous trial is reusable only when its
+`result.json` contains `verifier_result.rewards.reward` and its task checksum
+matches the current prepared task. Reward `0` is completed. A task is skipped
+only after the resume directories collectively provide at least the configured
+`n_attempts`; otherwise Harbor reruns the entire task rather than only the
+missing attempts. Reused trials are linked under the current result root's
+`resumed-trials/`, remaining tasks go to new timestamp directories, and the old
+experiment directories are not modified.
+
+For multiple non-resume jobs, preserve the requested order:
 
 ```bash
 mkdir -p results
@@ -97,6 +149,8 @@ manifests remain unchanged.
 
 `scripts/run-jobs.sh` runs jobs sequentially and stops on the first failure.
 Report which jobs completed, which job failed, and which later jobs were not
-started. Always print the resolved operator log path before launch and include
-it in the handoff, whether the run succeeds or fails. Do not retry, rebuild
-images, or change job configuration unless the user requests it.
+started. Do not use it for resumed jobs; run the single-job resume block
+separately for each exact job-to-directory mapping. Always print the resolved
+operator log path before launch and include it in the handoff, whether the run
+succeeds or fails. Do not retry, rebuild images, or change job configuration
+unless the user requests it.
