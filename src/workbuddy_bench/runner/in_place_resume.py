@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Callable, Iterable
 from urllib.parse import urlparse
 
+from harbor.publisher.packager import Packager
+
 from workbuddy_bench.runner.sharded_eval import load_tasks
 from workbuddy_bench.runner.task_images import resolve_task_images
 
@@ -351,6 +353,41 @@ def planned_counts(lock: dict) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def _planned_task_digests(lock: dict) -> dict[str, str]:
+    """Return the immutable Harbor task digest for each planned task."""
+
+    digests: dict[str, set[str]] = {}
+    for index, raw in enumerate(lock.get("trials") or []):
+        if not isinstance(raw, dict):
+            raise ResumeError("lock.json contains a non-object planned trial")
+        task_name = _trial_task_name(raw)
+        task = raw.get("task")
+        digest = task.get("digest") if isinstance(task, dict) else None
+        if not task_name:
+            raise ResumeError("lock.json contains a planned trial without a task name")
+        if not isinstance(digest, str) or not digest:
+            raise ResumeError(
+                f"lock.json planned trial {index} for task {task_name!r} "
+                "has no task digest"
+            )
+        digests.setdefault(task_name, set()).add(digest)
+
+    inconsistent = {
+        task_name: sorted(values)
+        for task_name, values in digests.items()
+        if len(values) != 1
+    }
+    if inconsistent:
+        raise ResumeError(
+            "lock.json contains multiple task digests for the same task: "
+            f"{inconsistent}"
+        )
+    return {
+        task_name: next(iter(values))
+        for task_name, values in sorted(digests.items())
+    }
+
+
 def validate_prebuilt_contract(
     config: dict,
     lock: dict,
@@ -358,7 +395,7 @@ def validate_prebuilt_contract(
     *,
     task_image_tag: str,
 ) -> dict[str, dict[str, object]]:
-    """Validate the minimum no-build contract and return current task checksums."""
+    """Validate the immutable no-build contract and return current task checksums."""
 
     environment = config.get("environment") or {}
     if environment.get("force_build", False) is not False:
@@ -383,6 +420,26 @@ def validate_prebuilt_contract(
     missing = sorted(set(planned) - set(current_tasks))
     if missing:
         raise ResumeError(f"prepared staged dataset is missing planned tasks: {missing}")
+
+    # The staged dataset is reconstructed from the current source checkout, so
+    # validate it against Harbor's immutable plan before inspecting or archiving
+    # any incomplete trial. This is also the only task-version evidence available
+    # when a trial has no usable result.json.
+    planned_digests = _planned_task_digests(lock)
+    for task_name, planned_digest in planned_digests.items():
+        task_dir = tasks_dir / task_name
+        try:
+            content_hash, _ = Packager.compute_content_hash(task_dir)
+        except (OSError, UnicodeError) as exc:
+            raise ResumeError(
+                f"cannot compute prepared task digest for {task_name!r}: {exc}"
+            ) from exc
+        current_digest = f"sha256:{content_hash}"
+        if current_digest != planned_digest:
+            raise ResumeError(
+                f"prepared task {task_name!r} digest does not match lock.json; "
+                "in-place resume cannot change the original task source"
+            )
 
     expected_images = {
         image.task_name: image.reference
@@ -522,13 +579,17 @@ def build_resume_plan(
                 else None
             )
             reward = rewards.get("reward") if isinstance(rewards, dict) else None
+            recorded_checksum = result.get("task_checksum")
+            has_recorded_checksum = (
+                isinstance(recorded_checksum, str) and bool(recorded_checksum)
+            )
             # Checksum drift is a dataset-wide problem, so it still aborts the
             # whole resume before any archiving, even for a trial that would be
             # retried anyway.
             if (
                 task_name != "<unknown>"
-                and reward is not None
-                and result.get("task_checksum") != current_tasks[task_name]["checksum"]
+                and has_recorded_checksum
+                and recorded_checksum != current_tasks[task_name]["checksum"]
             ):
                 raise ResumeError(
                     f"trial {trial_dir.name} checksum does not match the prepared "
@@ -537,6 +598,8 @@ def build_resume_plan(
             if not reason:
                 if task_name == "<unknown>":
                     reason = "unknown_task"
+                elif not has_recorded_checksum:
+                    reason = "missing_task_checksum"
                 elif is_retryable_exception(
                     exception_type,
                     retry_types=retry_exceptions,
