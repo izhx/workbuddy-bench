@@ -9,26 +9,11 @@ grades an empty workspace, so keeping them silently biases scores downward.
 from __future__ import annotations
 
 import json
-import sys
-import types
 from pathlib import Path
 
 import pytest
 
-# ``in_place_resume`` imports ``load_tasks`` from ``sharded_eval``, which pulls in
-# the Harbor/pydantic stack at module import time. Trial validity does not touch
-# any of it, so stub the two collaborator modules to keep these tests runnable
-# without the full runtime installed.
-for _module_name, _attr in (
-    ("workbuddy_bench.runner.sharded_eval", "load_tasks"),
-    ("workbuddy_bench.runner.task_images", "resolve_task_images"),
-):
-    if _module_name not in sys.modules:
-        _stub = types.ModuleType(_module_name)
-        setattr(_stub, _attr, lambda *args, **kwargs: {})
-        sys.modules[_module_name] = _stub
-
-from workbuddy_bench.runner.in_place_resume import (  # noqa: E402
+from workbuddy_bench.runner.in_place_resume import (
     DEFAULT_RETRYABLE_EXCEPTIONS,
     ResumeError,
     build_resume_plan,

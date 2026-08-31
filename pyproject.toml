@@ -26,6 +26,12 @@ dev = [
 [tool.uv.sources]
 harbor = { git = "https://github.com/harbor-framework/harbor.git", tag = "v0.18.0" }
 
+[tool.pytest.ini_options]
+# Only the repo's own suite. Without this, a bare `pytest` would also collect the
+# per-task grading tests under datasets/, which need a prepared task environment.
+testpaths = ["tests"]
+pythonpath = ["src"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

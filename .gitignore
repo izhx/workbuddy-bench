@@ -34,8 +34,14 @@ nohup.out
 .workspace/
 scripts/local/
 scripts/logs/
-# top-level scratch dir only; dataset tests/ trees stay tracked
-/tests
+# Top-level /tests holds both real pytest suites and local scratch. Track the
+# test files themselves; keep everything else there untracked. Dataset tests/
+# trees are unaffected (these patterns are anchored to the repo root).
+/tests/**
+!/tests/**/
+!/tests/**/test_*.py
+!/tests/**/conftest.py
+!/tests/**/README.md
 
 # === Machine-generated eval outputs ===
 /jobs/
