@@ -162,7 +162,9 @@ runner 会保留 checksum 匹配且 reward 非空的 trial（reward 为 `0` 也�
 checksum 不匹配会在归档前直接终止，因为原地恢复不能改变原 job 配置。
 如果旧 Harbor `config.json` 没有保存 `job_name`，runner 会在第一次实际恢复前补成
 当前实验目录名，并把原文件保存为 `config.json.before-in-place-resume`，避免
-Harbor 0.18 重新选择新的时间戳目录。
+Harbor 0.18 重新选择新的时间戳目录。旧 local-proxy URL 仅作为 provenance 保留，不再
+固定本次恢复端口；runner 会选择当前空闲端口，并在运行时将 Agent 和 LLM Judge 重绑到
+新地址，而不改写旧 Harbor config 或 lock。
 
 该模式下，`--dry-run` 会重建临时 staged dataset、打印 keep/archive/run 计划并执行
 本地 task 镜像 preflight，但不会移动 trial，也不会调用 Harbor。这是中断恢复，不是

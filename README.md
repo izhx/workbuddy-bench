@@ -176,7 +176,10 @@ before archiving because an in-place resume cannot change the original job.
 If an older Harbor config omitted `job_name`, the runner adds the experiment
 directory name before the first resume and preserves the original as
 `config.json.before-in-place-resume`; this prevents Harbor 0.18 from choosing
-a fresh timestamp directory.
+a fresh timestamp directory. A recorded local-proxy URL is retained as
+provenance but is not pinned: the resume selects the current free proxy port and
+rebinding is applied at runtime to the agent and any LLM judge without rewriting
+the old Harbor config or lock.
 
 For this mode, `--dry-run` reconstructs the temporary staged dataset, prints
 the exact keep/archive/run plan, and performs the local task-image preflight,

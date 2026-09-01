@@ -260,7 +260,7 @@ def _stage_instance_from_config(config: dict) -> tuple[str, str]:
 
 
 def bootstrap_info(job_dir: Path) -> BootstrapInfo:
-    """Extract the old instance and proxy identity needed by run.sh."""
+    """Extract immutable identity plus recorded proxy provenance for run.sh."""
 
     resolved, config, lock = _job_files(job_dir)
     trials = [trial for trial in lock["trials"] if isinstance(trial, dict)]
@@ -330,9 +330,9 @@ def emit_bootstrap_shell(info: BootstrapInfo) -> str:
         "RESUME_INSTANCE_ID": info.instance_id,
         "RESUME_DATASET_PATH": info.dataset_path,
         "RESUME_PROXY_MODE": info.proxy_mode,
-        "RESUME_PROXY_URL": info.proxy_url,
-        "RESUME_PROXY_HOST": info.proxy_host,
-        "RESUME_PROXY_PORT": "" if info.proxy_port is None else str(info.proxy_port),
+        # Audit-only provenance. The current resume allocates its own runtime
+        # endpoint and must not pin itself to this recorded host/port.
+        "RESUME_RECORDED_PROXY_URL": info.proxy_url,
         "RESUME_MODEL_ROUTE": info.model_route,
         "RESUME_TASKS_JSON": json.dumps(info.planned_tasks),
     }
@@ -794,7 +794,7 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     bootstrap = subparsers.add_parser(
-        "bootstrap", help="Read the old staged instance and proxy identity."
+        "bootstrap", help="Read staged identity and recorded proxy provenance."
     )
     bootstrap.add_argument("--job-dir", type=Path, required=True)
     bootstrap.add_argument("--emit-shell", action="store_true")

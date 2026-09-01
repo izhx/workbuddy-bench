@@ -11,6 +11,7 @@ from workbuddy_bench.runner.in_place_resume import (
     ResumeError,
     bootstrap_info,
     build_resume_plan,
+    emit_bootstrap_shell,
     is_retryable_exception,
     planned_counts,
     run_in_place_resume,
@@ -161,6 +162,11 @@ def test_bootstrap_extracts_staged_instance_and_proxy(tmp_path: Path) -> None:
     assert info.proxy_port == 4567
     assert info.model_route == "model-route"
     assert info.planned_tasks == (TASK_NAME,)
+
+    shell = emit_bootstrap_shell(info)
+    assert "RESUME_RECORDED_PROXY_URL=http://host.docker.internal:4567" in shell
+    assert "RESUME_PROXY_HOST=" not in shell
+    assert "RESUME_PROXY_PORT=" not in shell
 
 
 def test_plan_keeps_zero_reward_and_replaces_missing_reward(tmp_path: Path) -> None:
