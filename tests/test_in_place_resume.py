@@ -195,6 +195,31 @@ def test_plan_keeps_zero_reward_and_replaces_missing_reward(tmp_path: Path) -> N
     ]
 
 
+def test_plan_ignores_report_directory(tmp_path: Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_task(tasks_dir)
+    job_dir = _write_job(tmp_path, n_attempts=1)
+    report_dir = job_dir / "report"
+    report_dir.mkdir()
+    (report_dir / "score-report.md").write_text("report\n")
+
+    plan = _plan_for_job(job_dir, tasks_dir)
+
+    assert plan.valid_total == 0
+    assert plan.attempts_needed == 1
+    assert plan.invalid_trials == ()
+
+
+def test_plan_still_rejects_other_unrecognized_directory(tmp_path: Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_task(tasks_dir)
+    job_dir = _write_job(tmp_path, n_attempts=1)
+    (job_dir / "artifacts").mkdir()
+
+    with pytest.raises(ResumeError, match="unrecognized directory"):
+        _plan_for_job(job_dir, tasks_dir)
+
+
 def test_plan_archives_trial_with_invalid_config_json(tmp_path: Path) -> None:
     tasks_dir = tmp_path / "tasks"
     _write_task(tasks_dir)
@@ -507,6 +532,10 @@ def test_run_archives_invalid_trial_and_fills_only_missing_slot(
     invalid_trial = _write_trial(
         job_dir, "invalid", checksum=checksum, reward=None
     )
+    report_dir = job_dir / "report"
+    report_dir.mkdir()
+    report_file = report_dir / "score-report.md"
+    report_file.write_text("report\n")
     calls: list[Path] = []
 
     def fake_harbor(resume_dir: Path) -> int:
@@ -528,6 +557,7 @@ def test_run_archives_invalid_trial_and_fills_only_missing_slot(
     assert (job_dir / "config.json.before-in-place-resume").is_file()
     assert valid_trial.is_dir()
     assert not invalid_trial.exists()
+    assert report_file.read_text() == "report\n"
     history_root = job_dir.parent / f"{job_dir.name}.attempt-history"
     assert list(history_root.glob("*/task-one__invalid"))
     history = [

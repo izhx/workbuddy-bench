@@ -311,27 +311,31 @@ def _harbor_reward(result: Any) -> float | None:
 
 
 def _native_artifact_reward(trial_dir: Path) -> tuple[float | None, str | None]:
-    verifier = trial_dir / "verifier"
-    reward_txt = verifier / "reward.txt"
-    if reward_txt.is_file():
-        text = _read_text_limited(reward_txt, 4096).strip()
-        value = _unit_float(text.splitlines()[0] if text else None)
-        if value is not None:
-            return value, str(reward_txt)
-    for name in ("reward.json", "rewards.json"):
-        path = verifier / name
-        if not path.is_file():
-            continue
-        payload, _ = _read_json(path)
-        if isinstance(payload, dict):
-            for key in ("reward", "overall", "test_pass_rate"):
-                value = _unit_float(payload.get(key))
+    verifier_dirs = [
+        trial_dir / "verifier",
+        *sorted(trial_dir.glob("steps/*/verifier")),
+    ]
+    for verifier in verifier_dirs:
+        reward_txt = verifier / "reward.txt"
+        if reward_txt.is_file():
+            text = _read_text_limited(reward_txt, 4096).strip()
+            value = _unit_float(text.splitlines()[0] if text else None)
+            if value is not None:
+                return value, str(reward_txt)
+        for name in ("reward.json", "rewards.json"):
+            path = verifier / name
+            if not path.is_file():
+                continue
+            payload, _ = _read_json(path)
+            if isinstance(payload, dict):
+                for key in ("reward", "overall", "test_pass_rate"):
+                    value = _unit_float(payload.get(key))
+                    if value is not None:
+                        return value, str(path)
+            else:
+                value = _unit_float(payload)
                 if value is not None:
                     return value, str(path)
-        else:
-            value = _unit_float(payload)
-            if value is not None:
-                return value, str(path)
     return None, None
 
 

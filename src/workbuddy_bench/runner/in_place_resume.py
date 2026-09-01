@@ -77,6 +77,11 @@ RETRYABLE_INFRA_EXCEPTIONS = frozenset(
 
 DEFAULT_RETRYABLE_EXCEPTIONS = RETRYABLE_AGENT_EXCEPTIONS | RETRYABLE_INFRA_EXCEPTIONS
 
+# Report generators may keep derived output beside a Harbor experiment's trial
+# directories. This directory is not part of Harbor's trial plan and must not be
+# counted, validated, or archived during in-place resume.
+IGNORED_JOB_CHILD_DIR_NAMES = frozenset({"report"})
+
 # Notably absent, and deliberately so: ``AgentTimeoutError`` (the agent burned its
 # own wall-clock budget) plus ``ContextLengthExceededError`` and
 # ``OutputLengthExceededError`` (the model produced too much). Those are genuine
@@ -516,6 +521,8 @@ def build_resume_plan(
     trial_dir_count = 0
 
     for trial_dir in sorted(path for path in job_dir.iterdir() if path.is_dir()):
+        if trial_dir.name in IGNORED_JOB_CHILD_DIR_NAMES:
+            continue
         looks_like_trial = (
             "__" in trial_dir.name
             or (trial_dir / "config.json").exists()

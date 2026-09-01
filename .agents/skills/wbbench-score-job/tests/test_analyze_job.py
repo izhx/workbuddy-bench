@@ -158,6 +158,25 @@ class AnalyzeJobTests(unittest.TestCase):
         self.assertEqual(categories["positive_score_with_missing_output"], 1)
         self.assertFalse(result["validity"]["unqualified_model_score_usable"])
 
+    def test_sec_compares_nested_native_reward_with_harbor_reward(self) -> None:
+        run, task = self.make_run("sec")
+        trial = self.add_trial(run, task, "a", 0.75)
+        nested_verifier = trial / "steps" / "find-vuln" / "verifier"
+        nested_verifier.mkdir(parents=True)
+        (nested_verifier / "reward.txt").write_text("0.25\n", encoding="utf-8")
+
+        result = MODULE.analyze(run)
+
+        categories = result["anomalies"]["summary"]["by_category"]
+        self.assertEqual(categories["score_disagreement"], 1)
+        record = result["per_task"][task]["trials"][0]
+        self.assertAlmostEqual(record["native_artifact_reward"], 0.25)
+        self.assertEqual(
+            record["native_artifact_path"],
+            f"{trial.name}/steps/find-vuln/verifier/reward.txt",
+        )
+        self.assertFalse(result["validity"]["unqualified_model_score_usable"])
+
     def test_output_inside_run_is_rejected(self) -> None:
         run, task = self.make_run("web")
         self.add_trial(run, task, "a", 1.0, {"reward": 1.0})

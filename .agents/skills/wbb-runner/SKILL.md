@@ -183,9 +183,10 @@ remaining budget after an exhausted invocation, inspect new archive reasons.
 Stop when the same unresolved infrastructure cause repeats, identity/checksum/
 image/proxy validation fails, budget is exhausted, or the user interrupts.
 
-An unrelated child directory such as `report/` blocks native resume. Report its
-exact path and ask before moving it; never relocate or delete unrelated output
-automatically.
+A direct child directory named exactly `report/` is ignored by native resume so
+derived reports may remain inside the experiment. Any other unrelated child
+directory still blocks resume; report its exact path and ask before moving it.
+Never relocate or delete unrelated output automatically.
 
 ## Completion and handoff
 
