@@ -16,11 +16,13 @@ import statistics
 import sys
 import tomllib
 from collections import Counter, defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 
 SCHEMA_VERSION = 1
+DEFAULT_REPORT_DIRNAME = "report-wbb"
 SUBSETS: dict[str, dict[str, Any]] = {
     "office": {
         "dataset_id": "wb-bench-office-v1.0",
@@ -989,6 +991,7 @@ def render_markdown(data: dict[str, Any], language: str) -> str:
     score = data["score"]
     anomalies = data["anomalies"]
     validity = data["validity"]
+    report = data.get("report") or {}
     if language == "en":
         lines = [
             f"# {dataset['display_name']} job score report",
@@ -996,6 +999,7 @@ def render_markdown(data: dict[str, Any], language: str) -> str:
             "## Result",
             "",
             f"- Run: `{data['run_dir']}`",
+            f"- Report version: `{report.get('version')}`; generated at `{report.get('generated_at')}`",
             f"- Model / harness: `{run['model']}` / `{run['harness']}`",
             f"- Status: `{validity['status']}`; unqualified model score usable: `{str(validity['unqualified_model_score_usable']).lower()}`",
             f"- Coverage: {run['covered_planned_slots']}/{run['expected_trial_slots']} ({run['coverage']:.2%})",
@@ -1014,6 +1018,7 @@ def render_markdown(data: dict[str, Any], language: str) -> str:
             "## 结果概览",
             "",
             f"- Run：`{data['run_dir']}`",
+            f"- 报告版本：`{report.get('version')}`；生成时间：`{report.get('generated_at')}`",
             f"- 模型 / Harness：`{run['model']}` / `{run['harness']}`",
             f"- 有效性：`{validity['status']}`；可否无保留作为模型分数：`{str(validity['unqualified_model_score_usable']).lower()}`",
             f"- 覆盖率：{run['covered_planned_slots']}/{run['expected_trial_slots']}（{run['coverage']:.2%}）",
@@ -1086,12 +1091,7 @@ def render_markdown(data: dict[str, Any], language: str) -> str:
 
 
 def write_outputs(data: dict[str, Any], output_dir: Path, language: str, force: bool) -> tuple[Path, Path]:
-    run_dir = Path(data["run_dir"]).resolve()
     target = output_dir.expanduser().resolve()
-    if target == run_dir or run_dir in target.parents:
-        raise AnalysisError(
-            "refusing to write inside the Harbor run; use a sibling report directory"
-        )
     json_path = target / "score-analysis.json"
     report_path = target / "score-report.md"
     existing = [path for path in (json_path, report_path) if path.exists()]
@@ -1106,26 +1106,61 @@ def write_outputs(data: dict[str, Any], output_dir: Path, language: str, force: 
     return json_path, report_path
 
 
+def report_version(report_time: datetime) -> str:
+    if report_time.tzinfo is None:
+        report_time = report_time.replace(tzinfo=timezone.utc)
+    return report_time.astimezone(timezone.utc).strftime("%Y-%m-%d__%H-%M-%SZ")
+
+
+def default_output_dir(data: dict[str, Any], version: str) -> Path:
+    return (
+        Path(data["run_dir"]).resolve()
+        / DEFAULT_REPORT_DIRNAME
+        / version
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Calculate scores and audit anomalies for one WB-Bench Harbor job/run."
     )
     parser.add_argument("job_or_run_dir", type=Path)
     parser.add_argument("--dataset-root", type=Path, help="Dataset directory or parent datasets directory.")
-    parser.add_argument("--output-dir", type=Path, help="Sibling directory for score-analysis.json and score-report.md.")
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument(
+        "--output-dir",
+        type=Path,
+        help=(
+            "Output directory; defaults to "
+            "<RUN_DIR>/report-wbb/<UTC-report-time>."
+        ),
+    )
+    output.add_argument(
+        "--stdout",
+        action="store_true",
+        help="Emit the full JSON to stdout instead of writing report files.",
+    )
     parser.add_argument("--language", choices=("zh", "en"), default="zh")
     parser.add_argument("--force", action="store_true", help="Overwrite the two known output files.")
     args = parser.parse_args(argv)
     try:
         data = analyze(args.job_or_run_dir, args.dataset_root)
-        if args.output_dir:
-            json_path, report_path = write_outputs(data, args.output_dir, args.language, args.force)
+        if args.stdout:
+            print(json.dumps(data, indent=2, ensure_ascii=False))
+        else:
+            generated_at = datetime.now(timezone.utc).replace(microsecond=0)
+            version = report_version(generated_at)
+            output_dir = args.output_dir or default_output_dir(data, version)
+            data["report"] = {
+                "version": version,
+                "generated_at": generated_at.isoformat(),
+                "output_dir": str(output_dir.expanduser().resolve()),
+            }
+            json_path, report_path = write_outputs(data, output_dir, args.language, args.force)
             print(f"analysis_json={json_path}")
             print(f"report_md={report_path}")
             print(f"reward={data['score']['reward']:.4f}")
             print(f"status={data['validity']['status']}")
-        else:
-            print(json.dumps(data, indent=2, ensure_ascii=False))
     except AnalysisError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

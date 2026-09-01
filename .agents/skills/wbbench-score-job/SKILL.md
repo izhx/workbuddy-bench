@@ -17,16 +17,27 @@ From the WorkBuddy Bench repository root:
 ```bash
 uv run python .agents/skills/wbbench-score-job/scripts/analyze_job.py \
   <JOB_OR_RUN_DIR> \
-  --output-dir <REPORT_DIR> \
   --language zh
 ```
 
 Match `--language` to the user's request (`zh` or `en`). The script writes
-`score-analysis.json` and `score-report.md`. Unless the user specifies another
-location, use a sibling directory such as `<RUN_DIR>.score-report`; never write
-the report inside the Harbor run because an unrelated child directory can block
-native in-place resume. If the files already exist, stop or obtain explicit
-authorization before using `--force`.
+`score-analysis.json` and `score-report.md`. Each default invocation creates a
+new UTC-timestamped version directory:
+
+```text
+<RUN_DIR>/report-wbb/<YYYY-MM-DD__HH-MM-SSZ>/
+  score-analysis.json
+  score-report.md
+```
+
+This also applies when the input is the parent job directory. Use
+`--output-dir <REPORT_DIR>` only when the user requests another location, or
+`--stdout` when no report files should be written. If an explicitly selected
+output version already exists, stop or obtain authorization before `--force`.
+
+Native in-place resume ignores the exact direct child `report-wbb/`, including
+all timestamped report versions beneath it; it continues to reject unrelated
+child directories.
 
 The analyzer uses only Python's standard library. It resolves the dataset from
 the recorded run artifacts, obtains the planned task set from `lock.json`, and
@@ -59,7 +70,8 @@ why score sources or anomaly checks differ among Office, Web, Code, and SEC.
 
 ## Boundaries
 
-- Do not edit, move, quarantine, resume, or rerun Harbor artifacts.
+- Apart from creating a timestamped version under `<RUN_DIR>/report-wbb/`, do
+  not edit, move, quarantine, resume, or rerun Harbor artifacts.
 - Do not combine multiple runs, datasets, models, or shards into one score.
 - Do not infer a run when multiple candidates exist.
 - Keep exact task/trial evidence paths in the report and distinguish observed

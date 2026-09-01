@@ -78,9 +78,9 @@ RETRYABLE_INFRA_EXCEPTIONS = frozenset(
 DEFAULT_RETRYABLE_EXCEPTIONS = RETRYABLE_AGENT_EXCEPTIONS | RETRYABLE_INFRA_EXCEPTIONS
 
 # Report generators may keep derived output beside a Harbor experiment's trial
-# directories. This directory is not part of Harbor's trial plan and must not be
-# counted, validated, or archived during in-place resume.
-IGNORED_JOB_CHILD_DIR_NAMES = frozenset({"report"})
+# directories. These directories are not part of Harbor's trial plan and must
+# not be counted, validated, or archived during in-place resume.
+IGNORED_JOB_CHILD_DIR_NAMES = frozenset({"report", "report-wbb"})
 
 # Notably absent, and deliberately so: ``AgentTimeoutError`` (the agent burned its
 # own wall-clock budget) plus ``ContextLengthExceededError`` and

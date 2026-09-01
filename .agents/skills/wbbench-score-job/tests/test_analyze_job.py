@@ -4,7 +4,9 @@ import importlib.util
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "analyze_job.py"
@@ -177,12 +179,41 @@ class AnalyzeJobTests(unittest.TestCase):
         )
         self.assertFalse(result["validity"]["unqualified_model_score_usable"])
 
-    def test_output_inside_run_is_rejected(self) -> None:
+    def test_default_output_keeps_timestamped_report_versions(self) -> None:
         run, task = self.make_run("web")
         self.add_trial(run, task, "a", 1.0, {"reward": 1.0})
-        result = MODULE.analyze(run)
-        with self.assertRaises(MODULE.AnalysisError):
-            MODULE.write_outputs(result, run / "report", "en", False)
+        with mock.patch.object(MODULE, "datetime") as mocked_datetime:
+            mocked_datetime.now.side_effect = [
+                datetime(2026, 9, 1, 7, 51, 49, 123456, tzinfo=timezone.utc),
+                datetime(2026, 9, 1, 7, 51, 50, 654321, tzinfo=timezone.utc),
+            ]
+            self.assertEqual(
+                MODULE.main([str(run.parent), "--language", "en"]), 0
+            )
+            self.assertEqual(
+                MODULE.main([str(run.parent), "--language", "en"]), 0
+            )
+        report_root = run / "report-wbb"
+        versions = sorted(report_root.iterdir())
+        self.assertEqual(len(versions), 2)
+        self.assertNotEqual(versions[0].name, versions[1].name)
+        for report_dir in versions:
+            self.assertRegex(
+                report_dir.name,
+                r"^\d{4}-\d{2}-\d{2}__\d{2}-\d{2}-\d{2}Z$",
+            )
+            analysis_path = report_dir / "score-analysis.json"
+            self.assertTrue(analysis_path.is_file())
+            report_path = report_dir / "score-report.md"
+            self.assertTrue(report_path.is_file())
+            payload = json.loads(analysis_path.read_text())
+            self.assertEqual(payload["report"]["version"], report_dir.name)
+            self.assertEqual(payload["report"]["output_dir"], str(report_dir))
+            self.assertRegex(
+                payload["report"]["generated_at"],
+                r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$",
+            )
+            self.assertIn(report_dir.name, report_path.read_text())
 
 
 if __name__ == "__main__":

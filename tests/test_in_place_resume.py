@@ -195,12 +195,15 @@ def test_plan_keeps_zero_reward_and_replaces_missing_reward(tmp_path: Path) -> N
     ]
 
 
-def test_plan_ignores_report_directory(tmp_path: Path) -> None:
+@pytest.mark.parametrize("report_dir_name", ["report", "report-wbb"])
+def test_plan_ignores_report_directories(
+    tmp_path: Path, report_dir_name: str
+) -> None:
     tasks_dir = tmp_path / "tasks"
     _write_task(tasks_dir)
     job_dir = _write_job(tmp_path, n_attempts=1)
-    report_dir = job_dir / "report"
-    report_dir.mkdir()
+    report_dir = job_dir / report_dir_name / "2026-09-01__12-34-56.123456Z"
+    report_dir.mkdir(parents=True)
     (report_dir / "score-report.md").write_text("report\n")
 
     plan = _plan_for_job(job_dir, tasks_dir)
@@ -210,11 +213,14 @@ def test_plan_ignores_report_directory(tmp_path: Path) -> None:
     assert plan.invalid_trials == ()
 
 
-def test_plan_still_rejects_other_unrecognized_directory(tmp_path: Path) -> None:
+@pytest.mark.parametrize("child_name", ["artifacts", "report-wbb-old"])
+def test_plan_still_rejects_other_unrecognized_directory(
+    tmp_path: Path, child_name: str
+) -> None:
     tasks_dir = tmp_path / "tasks"
     _write_task(tasks_dir)
     job_dir = _write_job(tmp_path, n_attempts=1)
-    (job_dir / "artifacts").mkdir()
+    (job_dir / child_name).mkdir()
 
     with pytest.raises(ResumeError, match="unrecognized directory"):
         _plan_for_job(job_dir, tasks_dir)
@@ -532,8 +538,12 @@ def test_run_archives_invalid_trial_and_fills_only_missing_slot(
     invalid_trial = _write_trial(
         job_dir, "invalid", checksum=checksum, reward=None
     )
-    report_dir = job_dir / "report"
-    report_dir.mkdir()
+    report_dir = (
+        job_dir
+        / "report-wbb"
+        / "2026-09-01__12-34-56.123456Z"
+    )
+    report_dir.mkdir(parents=True)
     report_file = report_dir / "score-report.md"
     report_file.write_text("report\n")
     calls: list[Path] = []
