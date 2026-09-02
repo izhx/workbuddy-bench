@@ -51,6 +51,7 @@ from workbuddy_bench.runner.config_loaders import (
     CBC_AUTOCOMPACT_WINDOW_MIN as _AUTOCOMPACT_WINDOW_MIN,
     cbc_uses_autocompact_window_env as _supports_autocompact_window_env,
 )
+from workbuddy_bench.runner.runtime_proxy import runtime_proxy_url
 
 # cbc's stream-json output, tee'd here inside the container (under /logs/agent).
 _OUTPUT_FILENAME = "cbc-output.txt"
@@ -222,6 +223,11 @@ class CbcAgent(BaseInstalledAgent):
         # same env removes a confound). No-op when running as root.
         await ensure_agent_user(self, environment)
 
+    def _effective_proxy_url(self) -> str:
+        """Resolve the ephemeral runtime endpoint over recorded provenance."""
+
+        return runtime_proxy_url(self._proxy_url)
+
     # ── run ──────────────────────────────────────────────────────
     async def run(
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
@@ -235,7 +241,9 @@ class CbcAgent(BaseInstalledAgent):
             # The bench proxy speaks OpenAI on /v1/chat/completions, keys routes
             # by slug, and rewrites body["model"] + injects extra_body. cbc only
             # needs to address the route; the api key is a dummy for the hop.
-            url = self._ensure_chat_completions_url(self._proxy_url)
+            # The recorded URL is provenance. An in-place resume may start its
+            # proxy on a different free port and export a runtime-only override.
+            url = self._ensure_chat_completions_url(self._effective_proxy_url())
             api_key = self._get_env("CBC_API_KEY") or "proxy"
             # Prefix the per-trial session id onto the token as ``{trial}::{route}``.
             # The proxy splits on ``::``: the trial half is logged for per-trial

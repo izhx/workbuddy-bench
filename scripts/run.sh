@@ -13,6 +13,9 @@
 # Usage:
 #   uv run ./scripts/run.sh --job <slug>            # job is the entry point
 #   uv run ./scripts/run.sh --job <slug> --dry-run  # resolve manifest, print, exit
+#   uv run ./scripts/run.sh --job <slug> --resume-job results/<job>/<experiment-dir>
+#   uv run ./scripts/run.sh --job <slug> --task-image-tag <tag> \
+#     --resume-in-place results/<job>/<experiment-dir>
 #   SHARDS=4 uv run ./scripts/run.sh --job <slug>   # sharded / task_selection
 #
 # The model and dataset come from the job YAML's ``model:`` / ``dataset:`` keys
@@ -23,13 +26,61 @@ set -e
 JOB_SLUG=""
 DRY_RUN="${DRY_RUN:-0}"  # honor `DRY_RUN=1 ./run.sh ...`; --dry-run also sets it
 TASK_IMAGE_TAG_CLI=""
+RESUME_JOBS=()
+RESUME_IN_PLACE=""
+MAX_EXTRA_ATTEMPTS=""
+RETRY_EXCEPTIONS=()
+KEEP_EXCEPTIONS=()
+NO_RETRY_CRASHED=0
 while [[ $# -gt 0 ]]; do
     case $1 in
         --job)     JOB_SLUG="$2"; shift 2;;
         --task-image-tag) TASK_IMAGE_TAG_CLI="$2"; shift 2;;
+        --resume-job)
+            [ "$#" -ge 2 ] || { echo "ERROR: --resume-job requires a directory." >&2; exit 1; }
+            RESUME_JOBS+=("$2")
+            shift 2;;
+        --resume-in-place)
+            [ "$#" -ge 2 ] || { echo "ERROR: --resume-in-place requires a directory." >&2; exit 1; }
+            [ -z "$RESUME_IN_PLACE" ] || {
+                echo "ERROR: --resume-in-place can only be specified once." >&2
+                exit 1
+            }
+            RESUME_IN_PLACE="$2"
+            shift 2;;
+        --max-extra-attempts)
+            [ "$#" -ge 2 ] || { echo "ERROR: --max-extra-attempts requires a number." >&2; exit 1; }
+            MAX_EXTRA_ATTEMPTS="$2"
+            shift 2;;
+        --retry-exception)
+            [ "$#" -ge 2 ] || { echo "ERROR: --retry-exception requires a type name." >&2; exit 1; }
+            RETRY_EXCEPTIONS+=("$2")
+            shift 2;;
+        --keep-exception)
+            [ "$#" -ge 2 ] || { echo "ERROR: --keep-exception requires a type name." >&2; exit 1; }
+            KEEP_EXCEPTIONS+=("$2")
+            shift 2;;
+        --no-retry-crashed) NO_RETRY_CRASHED=1; shift;;
         --dry-run) DRY_RUN=1; shift;;
         --help|-h)
-            echo "Usage: $0 --job <slug> [--task-image-tag latest|YYYY-MM-DD] [--dry-run]"
+            echo "Usage: $0 --job <slug> [--task-image-tag latest|YYYY-MM-DD]"
+            echo "          [--resume-job <dir>]... [--resume-in-place <dir>]"
+            echo "          [--max-extra-attempts N] [--retry-exception TYPE]..."
+            echo "          [--keep-exception TYPE]... [--no-retry-crashed] [--dry-run]"
+            echo ""
+            echo "Options:"
+            echo "  --resume-job DIR      Reuse completed trials from an existing Harbor job directory"
+            echo "                        (repeatable; forces sharded_eval even when SHARDS is unset)"
+            echo "  --resume-in-place DIR Resume one Harbor experiment in its original directory"
+            echo "                        until every planned slot has a non-crashed, non-null reward"
+            echo "  --max-extra-attempts N"
+            echo "                        Bound new in-place attempts (default: total planned trials)"
+            echo "  --retry-exception TYPE"
+            echo "                        Also retry this Harbor exception_type (repeatable)."
+            echo "                        API/network/container crashes are retried by default"
+            echo "                        even when the crashed trial already carries a reward"
+            echo "  --keep-exception TYPE Keep this exception_type as a valid result (repeatable)"
+            echo "  --no-retry-crashed    Only retry trials with a missing reward (old behaviour)"
             echo ""
             echo "Jobs (from configs/jobs/, excluding _template*):"
             ls configs/jobs/*.yaml 2>/dev/null \
@@ -74,6 +125,11 @@ if [ -n "${SHARD_CONCURRENCY:-}" ]; then
         0)           echo "ERROR: SHARD_CONCURRENCY must be >= 1 (got 0)."; exit 1;;
     esac
 fi
+if [ -n "$MAX_EXTRA_ATTEMPTS" ]; then
+    case "$MAX_EXTRA_ATTEMPTS" in
+        *[!0-9]*) echo "ERROR: --max-extra-attempts must be a non-negative integer (got '$MAX_EXTRA_ATTEMPTS')."; exit 1;;
+    esac
+fi
 
 # ── Resolve paths ────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -81,10 +137,95 @@ cd "$SCRIPT_DIR/.."
 REPO_ROOT="$(pwd)"
 export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
+# Validate resume inputs before any manifest resolution or runtime setup. Keep
+# the original strings for sharded_eval so CLI logging preserves what the user
+# supplied; relative paths are defined relative to the repository root.
+for resume_job in "${RESUME_JOBS[@]}"; do
+    if [[ "$resume_job" = /* ]]; then
+        resume_job_path="$resume_job"
+    else
+        resume_job_path="$REPO_ROOT/$resume_job"
+    fi
+    [ -e "$resume_job_path" ] || {
+        echo "ERROR: Resume job path does not exist: $resume_job" >&2
+        exit 1
+    }
+    [ -d "$resume_job_path" ] || {
+        echo "ERROR: Resume job path is not a directory: $resume_job" >&2
+        exit 1
+    }
+done
+
+# In-place resume is one exact Harbor job, not the cross-job sharded reuse mode.
+if [ -n "$RESUME_IN_PLACE" ] && [ "${#RESUME_JOBS[@]}" -gt 0 ]; then
+    echo "ERROR: --resume-in-place and --resume-job are mutually exclusive." >&2
+    exit 1
+fi
+if [ -z "$RESUME_IN_PLACE" ] \
+    && { [ "${#RETRY_EXCEPTIONS[@]}" -gt 0 ] || [ "${#KEEP_EXCEPTIONS[@]}" -gt 0 ] \
+        || [ "$NO_RETRY_CRASHED" = "1" ]; }; then
+    echo "ERROR: --retry-exception/--keep-exception/--no-retry-crashed require --resume-in-place." >&2
+    exit 1
+fi
+if [ "$NO_RETRY_CRASHED" = "1" ] && [ "${#RETRY_EXCEPTIONS[@]}" -gt 0 ]; then
+    echo "ERROR: --no-retry-crashed cannot be combined with --retry-exception." >&2
+    exit 1
+fi
+if [ -n "$MAX_EXTRA_ATTEMPTS" ] && [ -z "$RESUME_IN_PLACE" ]; then
+    echo "ERROR: --max-extra-attempts requires --resume-in-place." >&2
+    exit 1
+fi
+if [ -n "$RESUME_IN_PLACE" ]; then
+    [ -n "$TASK_IMAGE_TAG_CLI" ] || {
+        echo "ERROR: --resume-in-place requires an explicit --task-image-tag." >&2
+        exit 1
+    }
+    [ "${SHARDS:-1}" = "1" ] || {
+        echo "ERROR: --resume-in-place cannot be combined with SHARDS > 1." >&2
+        exit 1
+    }
+    [ "${DISABLE_VERIFICATION:-0}" != "1" ] || {
+        echo "ERROR: --resume-in-place cannot change the recorded verification mode." >&2
+        exit 1
+    }
+    if [[ "$RESUME_IN_PLACE" = /* ]]; then
+        resume_in_place_path="$RESUME_IN_PLACE"
+    else
+        resume_in_place_path="$REPO_ROOT/$RESUME_IN_PLACE"
+    fi
+    [ -d "$resume_in_place_path" ] || {
+        echo "ERROR: In-place resume path is not a directory: $RESUME_IN_PLACE" >&2
+        exit 1
+    }
+    _RESUME_VARS="$(python3 -m workbuddy_bench.runner.in_place_resume bootstrap \
+        --job-dir "$resume_in_place_path" --emit-shell)" || exit $?
+    eval "$_RESUME_VARS"
+
+    command -v flock >/dev/null 2>&1 || {
+        echo "ERROR: --resume-in-place requires the flock command." >&2
+        exit 1
+    }
+    RESUME_LOCK_PATH="${RESUME_IN_PLACE_PATH}.resume.lock"
+    exec {RESUME_LOCK_FD}>"$RESUME_LOCK_PATH"
+    flock -n "$RESUME_LOCK_FD" || {
+        echo "ERROR: another in-place resume holds $RESUME_LOCK_PATH" >&2
+        exit 1
+    }
+fi
+
 # ── Load .env if present ─────────────────────────────────────────
 if [ -f "$REPO_ROOT/.env" ]; then
     set -a; source "$REPO_ROOT/.env"; set +a
     echo "Loaded environment from .env"
+fi
+
+# The original Harbor lock is authoritative for the staged path and connection
+# identity. The recorded proxy URL is provenance only: a local port is an
+# ephemeral runtime resource and may be rebound below. This mode is always
+# no-build.
+if [ -n "$RESUME_IN_PLACE" ]; then
+    INSTANCE_ID="$RESUME_INSTANCE_ID"
+    export NO_FORCE_BUILD=1
 fi
 
 JOB_CONFIG="configs/jobs/${JOB_SLUG}.yaml"
@@ -155,6 +296,11 @@ valid = {"direct","local_proxy"}
 if v not in valid: sys.exit(f"ERROR: {sys.argv[1]}: model_connection must be one of {sorted(valid)} (got {v!r})")
 print(v)
 ' "$JOB_CONFIG")" || exit $?
+if [ -n "$RESUME_IN_PLACE" ] && [ "$MODEL_CONNECTION" != "$RESUME_PROXY_MODE" ]; then
+    echo "ERROR: current job model_connection=$MODEL_CONNECTION does not match the" >&2
+    echo "       recorded in-place resume mode $RESUME_PROXY_MODE." >&2
+    exit 1
+fi
 
 # Protocol bridge needed when harness protocol is not among the model's protocols.
 NEEDS_PROXY_PROTOCOL="1"
@@ -188,7 +334,11 @@ fi
 
 # ── Per-instance state ───────────────────────────────────────────
 INSTANCE_ID="${INSTANCE_ID:-${JOB_SLUG}-$$-$(date +%s)}"
-INSTANCE_STATE_DIR="$REPO_ROOT/scripts/logs/instances/$INSTANCE_ID"
+if [ -n "$RESUME_IN_PLACE" ]; then
+    INSTANCE_STATE_DIR="$REPO_ROOT/scripts/logs/instances/$INSTANCE_ID-resume-$$-$(date +%s)"
+else
+    INSTANCE_STATE_DIR="$REPO_ROOT/scripts/logs/instances/$INSTANCE_ID"
+fi
 mkdir -p "$INSTANCE_STATE_DIR"
 echo "Instance ID: $INSTANCE_ID"
 
@@ -233,7 +383,7 @@ find_free_proxy_port() {
 # skip staging (--no-stage) to avoid a needless dataset copy + leftover dir.
 MANIFEST_PATH="$INSTANCE_STATE_DIR/manifest.json"
 RESOLVE_STAGE_FLAG=()
-[ "$DRY_RUN" = "1" ] && RESOLVE_STAGE_FLAG=(--no-stage)
+[ "$DRY_RUN" = "1" ] && [ -z "$RESUME_IN_PLACE" ] && RESOLVE_STAGE_FLAG=(--no-stage)
 TASK_IMAGE_TAG_INPUT="${TASK_IMAGE_TAG_CLI:-${TASK_IMAGE_TAG:-}}"
 RESOLVED_TASK_IMAGE_TAG=""
 if [ -n "$TASK_IMAGE_TAG_INPUT" ]; then
@@ -293,19 +443,16 @@ PY
     exit 1
 }
 
-# ── Dry-run: show manifest and exit ──────────────────────────────
+# ── Dry-run / harness preflight ──────────────────────────────────
 if [ "$DRY_RUN" = "1" ]; then
     echo ""
     echo "=== Resolved Manifest (dry-run) ==="
     python3 -m json.tool "$MANIFEST_PATH"
     harness_mount_preflight "1"
-    exit 0
+    [ -n "$RESUME_IN_PLACE" ] || exit 0
+else
+    harness_mount_preflight "0"
 fi
-
-harness_mount_preflight "0"
-
-# ── Validate model backend (fail-fast) ───────────────────────────
-python3 -m workbuddy_bench.runner.validate_model --manifest "$MANIFEST_PATH"
 
 # ── Read resolved manifest values ────────────────────────────────
 _MANIFEST_VARS="$(python3 -c "
@@ -319,8 +466,88 @@ emit('SELECTED_TASK_COUNT', len(m.get('selected_tasks') or []))
 eval "$_MANIFEST_VARS"
 HAS_TASK_SELECTION=0
 [ "${SELECTED_TASK_COUNT:-0}" -gt 0 ] && HAS_TASK_SELECTION=1 && echo "Task selection: $SELECTED_TASK_COUNT task(s)"
+if [ -n "$RESUME_IN_PLACE" ] && [ "$EFFECTIVE_TASKS_DIR" != "$RESUME_DATASET_PATH" ]; then
+    echo "ERROR: reconstructed dataset path $EFFECTIVE_TASKS_DIR does not match" >&2
+    echo "       recorded in-place resume path $RESUME_DATASET_PATH." >&2
+    exit 1
+fi
+if [ -n "$RESUME_IN_PLACE" ] && [ -n "$RESUME_MODEL_ROUTE" ] \
+    && [ "$BENCH_MODEL_ROUTE" != "$RESUME_MODEL_ROUTE" ]; then
+    echo "ERROR: current model route $BENCH_MODEL_ROUTE does not match recorded" >&2
+    echo "       in-place resume route $RESUME_MODEL_ROUTE." >&2
+    exit 1
+fi
+
+# Image preparation for an in-place resume follows the immutable Harbor trial
+# plan, not a possibly changed task_selection in the current job YAML.
+TASK_IMAGE_MANIFEST="$MANIFEST_PATH"
+if [ -n "$RESUME_IN_PLACE" ]; then
+    TASK_IMAGE_MANIFEST="$INSTANCE_STATE_DIR/resume-task-manifest.json"
+    python3 - "$MANIFEST_PATH" "$TASK_IMAGE_MANIFEST" "$RESUME_TASKS_JSON" <<'PY'
+import json
+import sys
+
+source, destination, planned_json = sys.argv[1:]
+manifest = json.load(open(source))
+manifest["selected_tasks"] = json.loads(planned_json)
+manifest["task_selection"] = "recorded lock.json plan"
+with open(destination, "w") as handle:
+    json.dump(manifest, handle, indent=2)
+    handle.write("\n")
+PY
+fi
+
+# Resolve task mutations once. In-place resume performs this before any proxy
+# startup so image/config failures remain side-effect free.
+_USER_VARS="$(python3 -m workbuddy_bench.runner.bench_config "$JOB_CONFIG" --emit-user-vars)" || exit $?
+eval "$_USER_VARS"
+TASKS_PREPARED=0
+prepare_effective_tasks() {
+    [ "$TASKS_PREPARED" = "0" ] || return 0
+    local -a prep_cmd=(python3 -m workbuddy_bench.runner.prepare_tasks "$EFFECTIVE_TASKS_DIR")
+    [ -n "$AGENT_USER" ] && prep_cmd+=(--agent-user "$AGENT_USER")
+    [ -n "$VERIFIER_USER" ] && prep_cmd+=(--verifier-user "$VERIFIER_USER")
+    if [ -n "$RESOLVED_TASK_IMAGE_TAG" ]; then
+        prep_cmd+=(--task-image-tag "$RESOLVED_TASK_IMAGE_TAG" --manifest "$TASK_IMAGE_MANIFEST")
+    fi
+    "${prep_cmd[@]}"
+    TASKS_PREPARED=1
+}
+
+# Retry-policy flags shared by the dry-run plan and the real resume, so the
+# printed plan matches what the resume will actually archive.
+RESUME_POLICY_FLAGS=()
+for exception_type in "${RETRY_EXCEPTIONS[@]+"${RETRY_EXCEPTIONS[@]}"}"; do
+    RESUME_POLICY_FLAGS+=(--retry-exception "$exception_type")
+done
+for exception_type in "${KEEP_EXCEPTIONS[@]+"${KEEP_EXCEPTIONS[@]}"}"; do
+    RESUME_POLICY_FLAGS+=(--keep-exception "$exception_type")
+done
+[ "$NO_RETRY_CRASHED" != "1" ] || RESUME_POLICY_FLAGS+=(--no-retry-crashed)
+
+if [ -n "$RESUME_IN_PLACE" ]; then
+    prepare_effective_tasks
+    resume_plan_cmd=(python3 -m workbuddy_bench.runner.in_place_resume run \
+        --job-dir "$RESUME_IN_PLACE_PATH" \
+        --tasks-dir "$EFFECTIVE_TASKS_DIR" \
+        --task-image-tag "$RESOLVED_TASK_IMAGE_TAG" \
+        --dry-run)
+    [ -z "$MAX_EXTRA_ATTEMPTS" ] || resume_plan_cmd+=(--max-extra-attempts "$MAX_EXTRA_ATTEMPTS")
+    resume_plan_cmd+=("${RESUME_POLICY_FLAGS[@]+"${RESUME_POLICY_FLAGS[@]}"}")
+    "${resume_plan_cmd[@]}"
+    python3 -m workbuddy_bench.runner.task_images preflight \
+        "$EFFECTIVE_TASKS_DIR" --tag "$RESOLVED_TASK_IMAGE_TAG" --manifest "$TASK_IMAGE_MANIFEST"
+    [ "$DRY_RUN" != "1" ] || exit 0
+fi
+
+# ── Validate model backend (fail-fast) ───────────────────────────
+python3 -m workbuddy_bench.runner.validate_model --manifest "$MANIFEST_PATH"
 
 # ── Configure connection ─────────────────────────────────────────
+# Internal runtime override consumed by the WorkBuddy agent wrappers and the
+# CompositeVerifier. Never inherit a stale value from the caller into this run.
+unset WORKBUDDY_RUNTIME_PROXY_URL
+
 wait_for_proxy_route() {
     local route="$1" deadline=$(( SECONDS + ${PROXY_ROUTE_WAIT:-20} ))
     while [ "$SECONDS" -lt "$deadline" ]; do
@@ -370,9 +597,14 @@ if [ -n "$USE_LOCAL_PROXY" ] && [ "${SHARED_PROXY:-0}" = "1" ]; then
         exit 1
     fi
 
-    # Back-fill the manifest proxy_url (same shape as the job-private path) so
-    # prepare_job points the harness at the shared proxy.
+    # Back-fill the manifest proxy_url for runtime consumers. Ordinary runs also
+    # feed it into prepare_job; in-place resume keeps the old Harbor config
+    # immutable and uses WORKBUDDY_RUNTIME_PROXY_URL instead.
     PROXY_HOST_URL="http://$PROXY_HOST:$PROXY_PORT"
+    export WORKBUDDY_RUNTIME_PROXY_URL="$PROXY_HOST_URL"
+    if [ -n "$RESUME_IN_PLACE" ] && [ "$PROXY_HOST_URL" != "$RESUME_RECORDED_PROXY_URL" ]; then
+        echo "In-place resume proxy rebound: recorded=$RESUME_RECORDED_PROXY_URL runtime=$PROXY_HOST_URL"
+    fi
     python3 - "$MANIFEST_PATH" "$PROXY_HOST_URL" <<'PY'
 import json, sys
 path, proxy_url = sys.argv[1], sys.argv[2]
@@ -441,11 +673,15 @@ elif [ -n "$USE_LOCAL_PROXY" ]; then
         PROXY_PORT="$NEW_PORT"
     fi
 
-    # Record the proxy URL into the manifest BEFORE prepare_job reads it, so the
-    # agent block's connection.proxy_url points the harness at this proxy. The
-    # harness reaches the host proxy from inside its container via
-    # host.docker.internal (PROXY_HOST; override for non-Docker runtimes).
+    # Record the proxy URL into the manifest for proxy config and judge routing.
+    # Ordinary runs also feed it into prepare_job; in-place resume keeps the old
+    # Harbor config immutable and supplies the runtime-only override. Containers
+    # reach the host via host.docker.internal (override PROXY_HOST for non-Docker).
     PROXY_HOST_URL="http://$PROXY_HOST:$PROXY_PORT"
+    export WORKBUDDY_RUNTIME_PROXY_URL="$PROXY_HOST_URL"
+    if [ -n "$RESUME_IN_PLACE" ] && [ "$PROXY_HOST_URL" != "$RESUME_RECORDED_PROXY_URL" ]; then
+        echo "In-place resume proxy rebound: recorded=$RESUME_RECORDED_PROXY_URL runtime=$PROXY_HOST_URL"
+    fi
     python3 - "$MANIFEST_PATH" "$PROXY_HOST_URL" <<'PY'
 import json, sys
 path, proxy_url = sys.argv[1], sys.argv[2]
@@ -520,25 +756,37 @@ else
 fi
 
 # ── Run evaluation ───────────────────────────────────────────────
-# Resolve exec user (bench _default + per-benchmark agent_user/verifier_user,
-# job-level override). Empty = leave task.toml as-is (root); prepare_tasks
-# injects when non-empty. bench_config resolves configs/bench/ for the job's
-# dataset so the merge matches every other reader.
-_USER_VARS="$(python3 -m workbuddy_bench.runner.bench_config "$JOB_CONFIG" --emit-user-vars)" || exit $?
-eval "$_USER_VARS"
-prep_cmd=(python3 -m workbuddy_bench.runner.prepare_tasks "$EFFECTIVE_TASKS_DIR")
-[ -n "$AGENT_USER" ] && prep_cmd+=(--agent-user "$AGENT_USER")
-[ -n "$VERIFIER_USER" ] && prep_cmd+=(--verifier-user "$VERIFIER_USER")
-if [ -n "$RESOLVED_TASK_IMAGE_TAG" ]; then
-    prep_cmd+=(--task-image-tag "$RESOLVED_TASK_IMAGE_TAG" --manifest "$MANIFEST_PATH")
-fi
-"${prep_cmd[@]}"
+prepare_effective_tasks
 
-if [ "${SHARDS:-1}" -gt 1 ] || [ "${HAS_TASK_SELECTION:-0}" -ne 0 ]; then
+if [ -n "$RESUME_IN_PLACE" ]; then
+    resume_cmd=(python3 -m workbuddy_bench.runner.in_place_resume run \
+        --job-dir "$RESUME_IN_PLACE_PATH" \
+        --tasks-dir "$EFFECTIVE_TASKS_DIR" \
+        --task-image-tag "$RESOLVED_TASK_IMAGE_TAG")
+    [ -z "$MAX_EXTRA_ATTEMPTS" ] || resume_cmd+=(--max-extra-attempts "$MAX_EXTRA_ATTEMPTS")
+    resume_cmd+=("${RESUME_POLICY_FLAGS[@]+"${RESUME_POLICY_FLAGS[@]}"}")
+    "${resume_cmd[@]}"
+
+    # Judge exactly this Harbor experiment. Do not scan sibling timestamp dirs.
+    if python3 -c "
+import json, sys
+j = (json.load(open('$MANIFEST_PATH')).get('llm_judge') or {})
+sys.exit(0 if (j.get('enabled') and (j.get('mode') or 'host_side') == 'host_side') else 1)
+"; then
+        echo "=== Host-side LLM judge (in-place experiment only) ==="
+        python3 -m workbuddy_bench.runner.run_post_judge \
+            --manifest "$MANIFEST_PATH" \
+            --job-dir "$RESUME_IN_PLACE_PATH" \
+            || echo "WARNING: host-side LLM judge failed (non-fatal; verifier reward stands)."
+    fi
+elif [ "${SHARDS:-1}" -gt 1 ] || [ "${HAS_TASK_SELECTION:-0}" -ne 0 ] || [ "${#RESUME_JOBS[@]}" -gt 0 ]; then
     cmd=(python3 -m workbuddy_bench.runner.sharded_eval \
         --config "$JOB_CONFIG" \
         --shards "${SHARDS:-1}" \
         --manifest "$MANIFEST_PATH")
+    for resume_job in "${RESUME_JOBS[@]}"; do
+        cmd+=(--resume-job "$resume_job")
+    done
     # Only pin per-shard concurrency when SHARD_CONCURRENCY is explicitly set;
     # otherwise sharded_eval defaults it from the job's n_concurrent_trials
     # (orchestrator_override), falling back to 2.
