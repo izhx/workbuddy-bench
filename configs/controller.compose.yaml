@@ -30,12 +30,9 @@ services:
       PYTHONPATH: "${WB_REPO_ROOT}/src"
       UV_PROJECT_ENVIRONMENT: "${WB_REPO_ROOT}/.workspace/controller-venv"
       UV_CACHE_DIR: "${WB_REPO_ROOT}/.workspace/controller-uv-cache"
-      http_proxy: ${http_proxy:-}
-      https_proxy: ${https_proxy:-}
-      no_proxy: ${no_proxy:-}
-      HTTP_PROXY: ${http_proxy:-}
-      HTTPS_PROXY: ${https_proxy:-}
-      NO_PROXY: ${no_proxy:-}
+      back_http_proxy: ${http_proxy:-}
+      back_https_proxy: ${https_proxy:-}
+      back_no_proxy: ${no_proxy:-}
 
     volumes:
       # Keep the same absolute repository path inside and outside the
