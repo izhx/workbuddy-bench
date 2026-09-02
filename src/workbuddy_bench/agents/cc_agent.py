@@ -45,6 +45,7 @@ from harbor.models.trajectories.trajectory import Trajectory
 
 from workbuddy_bench.agents._usage import cached_input_tokens
 from workbuddy_bench.agents._agent_user import ensure_agent_user
+from workbuddy_bench.runner.runtime_proxy import runtime_proxy_url
 
 # claude CLI's stream-json output, tee'd here inside the container (under /logs/agent).
 _OUTPUT_FILENAME = "cc-output.txt"
@@ -193,6 +194,11 @@ class CcAgent(BaseInstalledAgent):
         # agent_user is already on environment.default_user; we just materialize it.
         await ensure_agent_user(self, environment)
 
+    def _effective_proxy_url(self) -> str:
+        """Resolve the ephemeral runtime endpoint over recorded provenance."""
+
+        return runtime_proxy_url(self._proxy_url)
+
     # ── run ──────────────────────────────────────────────────────
     async def run(
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
@@ -207,7 +213,9 @@ class CcAgent(BaseInstalledAgent):
             # The bench proxy speaks Anthropic on /v1/messages, keys routes by slug,
             # converts A→O (a2o) and rewrites body["model"] + injects extra_body. cc
             # only needs to address the route; the api key is a dummy for the hop.
-            base_url = self._proxy_url
+            # The recorded URL is provenance. An in-place resume may start its
+            # proxy on a different free port and export a runtime-only override.
+            base_url = self._effective_proxy_url()
             api_key = self._get_env("ANTHROPIC_API_KEY") or "dummy-for-proxy"
             # Prefix the per-trial session id onto the token as ``{trial}::{route}``.
             # The proxy splits on ``::``: the trial half is logged for per-trial
