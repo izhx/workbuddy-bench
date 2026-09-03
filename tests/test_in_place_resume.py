@@ -11,6 +11,7 @@ from workbuddy_bench.runner.in_place_resume import (
     ResumeError,
     bootstrap_info,
     build_resume_plan,
+    emit_bootstrap_shell,
     is_retryable_exception,
     planned_counts,
     run_in_place_resume,
@@ -162,6 +163,11 @@ def test_bootstrap_extracts_staged_instance_and_proxy(tmp_path: Path) -> None:
     assert info.model_route == "model-route"
     assert info.planned_tasks == (TASK_NAME,)
 
+    shell = emit_bootstrap_shell(info)
+    assert "RESUME_RECORDED_PROXY_URL=http://host.docker.internal:4567" in shell
+    assert "RESUME_PROXY_HOST=" not in shell
+    assert "RESUME_PROXY_PORT=" not in shell
+
 
 def test_plan_keeps_zero_reward_and_replaces_missing_reward(tmp_path: Path) -> None:
     tasks_dir = tmp_path / "tasks"
@@ -187,6 +193,37 @@ def test_plan_keeps_zero_reward_and_replaces_missing_reward(tmp_path: Path) -> N
     assert [(item.path, item.reason) for item in plan.invalid_trials] == [
         (missing_reward, "missing_reward")
     ]
+
+
+@pytest.mark.parametrize("report_dir_name", ["report", "report-wbb"])
+def test_plan_ignores_report_directories(
+    tmp_path: Path, report_dir_name: str
+) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_task(tasks_dir)
+    job_dir = _write_job(tmp_path, n_attempts=1)
+    report_dir = job_dir / report_dir_name / "2026-09-01__12-34-56.123456Z"
+    report_dir.mkdir(parents=True)
+    (report_dir / "score-report.md").write_text("report\n")
+
+    plan = _plan_for_job(job_dir, tasks_dir)
+
+    assert plan.valid_total == 0
+    assert plan.attempts_needed == 1
+    assert plan.invalid_trials == ()
+
+
+@pytest.mark.parametrize("child_name", ["artifacts", "report-wbb-old"])
+def test_plan_still_rejects_other_unrecognized_directory(
+    tmp_path: Path, child_name: str
+) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_task(tasks_dir)
+    job_dir = _write_job(tmp_path, n_attempts=1)
+    (job_dir / child_name).mkdir()
+
+    with pytest.raises(ResumeError, match="unrecognized directory"):
+        _plan_for_job(job_dir, tasks_dir)
 
 
 def test_plan_archives_trial_with_invalid_config_json(tmp_path: Path) -> None:
@@ -501,6 +538,14 @@ def test_run_archives_invalid_trial_and_fills_only_missing_slot(
     invalid_trial = _write_trial(
         job_dir, "invalid", checksum=checksum, reward=None
     )
+    report_dir = (
+        job_dir
+        / "report-wbb"
+        / "2026-09-01__12-34-56.123456Z"
+    )
+    report_dir.mkdir(parents=True)
+    report_file = report_dir / "score-report.md"
+    report_file.write_text("report\n")
     calls: list[Path] = []
 
     def fake_harbor(resume_dir: Path) -> int:
@@ -522,6 +567,7 @@ def test_run_archives_invalid_trial_and_fills_only_missing_slot(
     assert (job_dir / "config.json.before-in-place-resume").is_file()
     assert valid_trial.is_dir()
     assert not invalid_trial.exists()
+    assert report_file.read_text() == "report\n"
     history_root = job_dir.parent / f"{job_dir.name}.attempt-history"
     assert list(history_root.glob("*/task-one__invalid"))
     history = [

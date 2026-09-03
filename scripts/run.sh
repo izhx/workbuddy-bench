@@ -219,13 +219,12 @@ if [ -f "$REPO_ROOT/.env" ]; then
     echo "Loaded environment from .env"
 fi
 
-# The original Harbor lock is authoritative for the staged path and proxy URL.
-# Apply these after .env so ambient INSTANCE_ID/PROXY_* values cannot redirect
-# an in-place resume to a new path or endpoint. This mode is always no-build.
+# The original Harbor lock is authoritative for the staged path and connection
+# identity. The recorded proxy URL is provenance only: a local port is an
+# ephemeral runtime resource and may be rebound below. This mode is always
+# no-build.
 if [ -n "$RESUME_IN_PLACE" ]; then
     INSTANCE_ID="$RESUME_INSTANCE_ID"
-    [ -z "$RESUME_PROXY_PORT" ] || export PROXY_PORT="$RESUME_PROXY_PORT"
-    [ -z "$RESUME_PROXY_HOST" ] || export PROXY_HOST="$RESUME_PROXY_HOST"
     export NO_FORCE_BUILD=1
 fi
 
@@ -545,6 +544,10 @@ fi
 python3 -m workbuddy_bench.runner.validate_model --manifest "$MANIFEST_PATH"
 
 # ── Configure connection ─────────────────────────────────────────
+# Internal runtime override consumed by the WorkBuddy agent wrappers and the
+# CompositeVerifier. Never inherit a stale value from the caller into this run.
+unset WORKBUDDY_RUNTIME_PROXY_URL
+
 wait_for_proxy_route() {
     local route="$1" deadline=$(( SECONDS + ${PROXY_ROUTE_WAIT:-20} ))
     while [ "$SECONDS" -lt "$deadline" ]; do
@@ -594,13 +597,13 @@ if [ -n "$USE_LOCAL_PROXY" ] && [ "${SHARED_PROXY:-0}" = "1" ]; then
         exit 1
     fi
 
-    # Back-fill the manifest proxy_url (same shape as the job-private path) so
-    # prepare_job points the harness at the shared proxy.
+    # Back-fill the manifest proxy_url for runtime consumers. Ordinary runs also
+    # feed it into prepare_job; in-place resume keeps the old Harbor config
+    # immutable and uses WORKBUDDY_RUNTIME_PROXY_URL instead.
     PROXY_HOST_URL="http://$PROXY_HOST:$PROXY_PORT"
-    if [ -n "$RESUME_IN_PLACE" ] && [ "$PROXY_HOST_URL" != "$RESUME_PROXY_URL" ]; then
-        echo "ERROR: shared proxy URL $PROXY_HOST_URL does not match recorded" >&2
-        echo "       in-place resume URL $RESUME_PROXY_URL." >&2
-        exit 1
+    export WORKBUDDY_RUNTIME_PROXY_URL="$PROXY_HOST_URL"
+    if [ -n "$RESUME_IN_PLACE" ] && [ "$PROXY_HOST_URL" != "$RESUME_RECORDED_PROXY_URL" ]; then
+        echo "In-place resume proxy rebound: recorded=$RESUME_RECORDED_PROXY_URL runtime=$PROXY_HOST_URL"
     fi
     python3 - "$MANIFEST_PATH" "$PROXY_HOST_URL" <<'PY'
 import json, sys
@@ -665,25 +668,19 @@ PY
 elif [ -n "$USE_LOCAL_PROXY" ]; then
     mkdir -p "$PROXY_LOG_DIR"
     if fuser "$PROXY_PORT/tcp" >/dev/null 2>&1; then
-        if [ -n "$RESUME_IN_PLACE" ]; then
-            echo "ERROR: recorded job-private proxy port :$PROXY_PORT is busy;" >&2
-            echo "       in-place resume cannot switch to a different URL." >&2
-            exit 1
-        fi
         NEW_PORT="$(find_free_proxy_port "$((PROXY_PORT+1))")"
         echo "Port :$PROXY_PORT busy; using job-private proxy on :$NEW_PORT"
         PROXY_PORT="$NEW_PORT"
     fi
 
-    # Record the proxy URL into the manifest BEFORE prepare_job reads it, so the
-    # agent block's connection.proxy_url points the harness at this proxy. The
-    # harness reaches the host proxy from inside its container via
-    # host.docker.internal (PROXY_HOST; override for non-Docker runtimes).
+    # Record the proxy URL into the manifest for proxy config and judge routing.
+    # Ordinary runs also feed it into prepare_job; in-place resume keeps the old
+    # Harbor config immutable and supplies the runtime-only override. Containers
+    # reach the host via host.docker.internal (override PROXY_HOST for non-Docker).
     PROXY_HOST_URL="http://$PROXY_HOST:$PROXY_PORT"
-    if [ -n "$RESUME_IN_PLACE" ] && [ "$PROXY_HOST_URL" != "$RESUME_PROXY_URL" ]; then
-        echo "ERROR: proxy URL $PROXY_HOST_URL does not match recorded" >&2
-        echo "       in-place resume URL $RESUME_PROXY_URL." >&2
-        exit 1
+    export WORKBUDDY_RUNTIME_PROXY_URL="$PROXY_HOST_URL"
+    if [ -n "$RESUME_IN_PLACE" ] && [ "$PROXY_HOST_URL" != "$RESUME_RECORDED_PROXY_URL" ]; then
+        echo "In-place resume proxy rebound: recorded=$RESUME_RECORDED_PROXY_URL runtime=$PROXY_HOST_URL"
     fi
     python3 - "$MANIFEST_PATH" "$PROXY_HOST_URL" <<'PY'
 import json, sys

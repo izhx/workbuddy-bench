@@ -9,10 +9,17 @@ from typing import Any, Mapping
 
 from harbor.models.trial.paths import EnvironmentPaths
 
-from workbuddy_bench.judge.core import ArtifactWriter, EvaluationContext, ScoreResult
+from workbuddy_bench.judge.core import (
+    VERIFIER_LLM_ENV_PREFIX,
+    ArtifactWriter,
+    EvaluationContext,
+    ScoreResult,
+)
 from workbuddy_bench.judge.runners.rule.script_verifier_resilience import (
     transform_verifier_file,
 )
+from workbuddy_bench.runner.model_endpoints import openai_api_base_url
+from workbuddy_bench.runner.runtime_proxy import runtime_proxy_url
 
 
 def merged_verifier_env(
@@ -31,6 +38,14 @@ def merged_verifier_env(
         env.update({str(k): str(v) for k, v in verifier.verifier_env.items()})
     if getattr(verifier, "override_env", None):
         env.update({str(k): str(v) for k, v in verifier.override_env.items()})
+    # ``harbor job resume`` reconstructs verifier env from the immutable old
+    # config. Rebind only an already-configured verifier-side LLM route to the
+    # current local proxy; do not turn programmatic verifiers into LLM judges.
+    verifier_base_key = f"{VERIFIER_LLM_ENV_PREFIX}BASE_URL"
+    if verifier_base_key in env:
+        current_proxy_url = runtime_proxy_url()
+        if current_proxy_url:
+            env[verifier_base_key] = openai_api_base_url(current_proxy_url)
     if prepend_pythonpath:
         env["PYTHONPATH"] = _prepend_path(prepend_pythonpath, env.get("PYTHONPATH"))
     return env

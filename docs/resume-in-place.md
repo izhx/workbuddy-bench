@@ -113,7 +113,8 @@ uv run ./scripts/run.sh \
 - staged dataset 中的 instance id 必须与 trial 中记录的 instance id 一致；
 - 当前 job 的 `model_connection` 必须与旧 trial 一致；
 - 如果旧 trial 记录了 model route，当前 route 必须与其一致；
-- local proxy URL、host 和 port 必须保持一致；
+- 旧 planned trial 中记录的 local proxy URL 必须内部一致且格式有效；该值只作为 provenance，
+  不要求等于本次恢复的运行时 URL；
 - planned task 必须仍然存在；
 - 已完成 trial 的 task checksum 必须匹配当前重新准备后的 task。
 
@@ -331,16 +332,20 @@ task selection。
 - `direct` 只能由当前仍为 `direct` 的 job 恢复；
 - `local_proxy` 只能由当前仍为 `local_proxy` 的 job 恢复；
 - model route 必须相同；
-- proxy URL 必须相同。
+- 旧 proxy URL 保留在 `config.json` / `lock.json` 中用于 provenance，不作为不可变身份。
 
-对于 job-private proxy，runner 必须重新使用旧 host 和 port。如果该 port 已被占用，命令直接
-失败，不会像普通新实验一样自动寻找下一个空闲端口。
+对于 job-private proxy，runner 与普通新实验一样从当前 `PROXY_HOST` / `PROXY_PORT` 开始；
+首选端口已被占用时自动寻找下一个空闲端口。本次地址写入新 manifest，并通过内部
+`WORKBUDDY_RUNTIME_PROXY_URL` 覆盖旧 Harbor 配置中的地址。`CcAgent`、`CbcAgent`、
+CompositeVerifier 的 in-container LLM judge，以及读取新 manifest 的 host-side judge 都使用
+本次运行时地址；旧 `config.json`、`lock.json` 和已完成 trial 配置不会因此被改写。
 
-对于 shared proxy，实际 URL 必须与旧 URL 相同，runner 会把当前 job 所需 routes 合并到
-shared proxy 并 reload。
+对于 shared proxy，runner 使用当前共享代理地址，把当前 job 所需 routes 合并后 reload；
+该地址也不要求与历史地址相同。
 
-旧实验中的 instance/proxy 值会在加载 `.env` 后重新覆盖环境变量，因此 `.env` 不能把原地
-恢复重定向到另一个 staging 路径或 proxy endpoint。
+旧实验中的 instance id 会在加载 `.env` 后重新覆盖，避免恢复指向另一个 staged dataset；
+proxy endpoint 则是本次运行的临时资源，可以由当前 `PROXY_HOST` / `PROXY_PORT` 配置并在
+端口冲突时自动重绑。
 
 ## 12. 原实验目录和归档目录的写入
 
@@ -391,7 +396,7 @@ results/<job>/<experiment>.resume.lock
 
 不同实验使用不同 lock，不会因实验目录写入而直接冲突。但它们仍可能竞争：
 
-- 相同的 recorded job-private proxy port；
+- shared proxy 的固定端口，或 job-private proxy 的首选端口（后者会自动换到空闲端口）；
 - Docker、CPU、磁盘或模型并发额度；
 - 被人为复用的相同 instance id/staged path。
 
