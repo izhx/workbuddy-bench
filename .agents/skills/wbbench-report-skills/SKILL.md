@@ -1,6 +1,6 @@
 ---
 name: wbbench-report-skills
-description: Use when generating analysis reports for WB-Bench-Office, WB-Bench-Web, or WB-Bench-Code from a single Harbor evaluation run artifact directory; route to the matching reference workflow.
+description: Use when generating analysis reports for WB-Bench-Office, WB-Bench-Web, WB-Bench-Code, or WB-Bench-SEC from a single Harbor evaluation run artifact directory; route to the matching reference workflow.
 ---
 
 # WB-Bench Report Skills
@@ -13,6 +13,8 @@ benchmark-specific workflow under `references/`:
 - `references/wb-bench-web.md`: `WB-Bench-Web` web, UI automation, visual,
   reporting, and test-generation task reports.
 - `references/wb-bench-code.md`: `WB-Bench-Code` code task reports.
+- `references/wb-bench-sec.md`: `WB-Bench-SEC` task-native security reports,
+  including runtime-validity and required-output audits.
 
 ## Routing
 
@@ -24,18 +26,23 @@ When the user asks for a report for one of these benchmarks:
    - `references/wb-bench-office.md`
    - `references/wb-bench-web.md`
    - `references/wb-bench-code.md`
+   - `references/wb-bench-sec.md`
 3. Use the public display name in report titles:
    - `WB-Bench-Office`
    - `WB-Bench-Web`
    - `WB-Bench-Code`
-4. Use public dataset ids without version suffixes:
+   - `WB-Bench-SEC`
+4. Use public dataset ids without version suffixes in titles and general prose:
    - `wb-bench-office`
    - `wb-bench-web`
    - `wb-bench-code`
+   - `wb-bench-sec`
+   Preserve an exact versioned dataset id recorded by Harbor when identifying
+   the run or its scoring contract.
 5. Keep Harbor input artifacts read-only and write outputs only to `REPORT_DIR`
    (see Shared Workflow; defaults to `<RUN_DIR>/report/`).
 
-Fallback: if the benchmark cannot be identified, ask the user which of the three
+Fallback: if the benchmark cannot be identified, ask the user which of the four
 report workflows to use.
 
 If the user does not provide any path, ask them to provide a valid complete
@@ -81,13 +88,27 @@ the user request, or default to `<RUN_DIR>/report/` when the user does not
 specify one. Writing a new `report/` subdirectory under `RUN_DIR` only adds
 files and does not alter existing Harbor artifacts.
 
-1. Validate `RUN_DIR`. Do not select a trial directory.
-2. Generate the core metric data:
+1. Validate `RUN_DIR`. Do not select a trial directory. Create `REPORT_DIR` if
+   needed.
+2. Generate the core metric data with the command selected by the routed
+   workflow. For Office, Web, and Code:
 
 ```bash
 cd /path/to/workbuddy-bench
 uv run python -m workbuddy_bench.scorer.metrics <RUN_DIR> --json > <REPORT_DIR>/metrics.json
 ```
+
+   For SEC, use the repository-local task-native analyzer instead of the
+   generic `score.json` reader:
+
+```bash
+cd /path/to/workbuddy-bench
+uv run python .agents/skills/wbbench-score-job/scripts/analyze_job.py \
+  <RUN_DIR> --stdout > <REPORT_DIR>/metrics.json
+```
+
+   Add `--dataset-root <DATASET_ROOT>` only when the dataset is outside the
+   current repository or the user explicitly supplies its location.
 
 3. Read the benchmark-specific steps in the matching reference workflow: task
    metadata sources (only when the user provides a dataset root; use the public
@@ -112,8 +133,8 @@ run's own `config.json`, the Harbor `manifest.json` when available, and the
   report.md      # the analysis report
 ```
 
-`metrics.json` is emitted by `workbuddy_bench.scorer.metrics --json`. Its
-top-level keys are:
+For Office, Web, and Code, `metrics.json` is emitted by
+`workbuddy_bench.scorer.metrics --json`. Its top-level keys are:
 
 - `run_dir`: resolved run path.
 - `reward`: primary score; mean of per-task reward (build_error counts as 0).
@@ -129,8 +150,13 @@ top-level keys are:
   full_pass, build_error}`.
 - `definitions`: inline glossary for `reward` and `pass_rate`.
 
-Treat `reward` as the primary score and `pass_rate` as the all-tests-passed
-rate; do not conflate them.
+For SEC, `metrics.json` is emitted by the task-native analyzer. Read
+`references/wb-bench-sec.md` for its `score`, `run`, `breakdowns`, `anomalies`,
+and `validity` fields. Do not look for the Office/Web/Code fields at the top
+level.
+
+Treat `reward` (or SEC `score.reward`) as the primary score and `pass_rate` (or
+SEC `score.pass_rate`) as the full-score rate; do not conflate them.
 
 ## Boundaries
 

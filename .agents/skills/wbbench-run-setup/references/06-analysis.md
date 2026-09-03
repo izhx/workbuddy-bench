@@ -3,7 +3,8 @@
 Do **not** reimplement reporting here. Once the run finishes, hand off to the
 **`wbbench-report-skills`** skill (invoke it via the Skill tool). That skill
 owns metric computation and trajectory analysis and routes to the matching
-benchmark-specific workflow (WB-Bench-Office / WB-Bench-Web / WB-Bench-Code).
+benchmark-specific workflow (WB-Bench-Office / WB-Bench-Web / WB-Bench-Code /
+WB-Bench-SEC).
 
 ## What to pass
 
