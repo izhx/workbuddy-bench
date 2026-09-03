@@ -67,7 +67,7 @@ model_connection: local_proxy
 # OPTIONAL — capture the full request/response of every model call (local_proxy
 # only). After the run, the proxy log is split by trial into
 # results/<slug>/<ts>/<trial>/agent/requests.jsonl. Default off.
-# record_full_io: true
+record_full_io: true
 
 # OPTIONAL — task subset, resolved into manifest.selected_tasks. Omit or use
 # mode: all to run every task under dataset:.
