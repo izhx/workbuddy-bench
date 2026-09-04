@@ -19,7 +19,7 @@
 
 # REQUIRED — model slug; must match a configs/models/<slug>.yaml file
 # (excluding `_template.*`).
-model: dsv4-flash
+model: dsv4-pro
 
 # REQUIRED — canonical harness slug: <family>/<version>, e.g.
 # codebuddy-code/2.103.4.
