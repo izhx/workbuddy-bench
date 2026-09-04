@@ -17,9 +17,11 @@ request whose token carried no trial), or whose trial dir cannot be found, is
 source ``<instance_id>.jsonl`` is deleted; otherwise the unattributed lines are
 written back and the file is kept.
 
-Called automatically by scripts/run.sh after all evaluation + judging finishes
-(covers both the sharded and non-sharded paths — they share one instance_id).
-Failures are non-fatal (logged, returns 0) so they never gate a run.
+Called automatically by scripts/run.sh from its exit-cleanup path, so records the
+proxy already flushed are still fanned out when the run exits non-zero (e.g. the
+Harbor summary printer crashing after evaluation actually finished) or is
+interrupted. Covers both the sharded and non-sharded paths — they share one
+instance_id. Failures are non-fatal (logged, returns 0) so they never gate a run.
 
     python3 -m workbuddy_bench.runner.split_proxy_log --manifest <instance>/manifest.json
 """
@@ -33,6 +35,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import yaml
+
 from workbuddy_bench.runner.sharded_eval import find_harbor_job_dirs
 
 
@@ -40,10 +44,39 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def _job_root_from_runtime_config(config_path: Path) -> Path | None:
+    """Return the Harbor jobs root declared by a generated runtime config.
+
+    ``prepare_job`` writes the fully-resolved ``jobs_dir`` (honoring the job's
+    ``jobs_dir`` / ``jobs_dir_suffix``) into the runtime YAML, so reading it back
+    is what keeps this splitter correct for jobs that do not land in the default
+    ``results/<job_slug>``. Returns None when the config is missing or unreadable
+    so the caller can fall back to the default layout.
+    """
+    try:
+        config = yaml.safe_load(config_path.read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    jobs_dir = config.get("jobs_dir")
+    if not jobs_dir:
+        return None
+    root = Path(str(jobs_dir))
+    return root if root.is_absolute() else (_repo_root() / root)
+
+
 def _trial_dirs_by_name(job_root: Path) -> dict[str, Path]:
-    """Map trial_name -> trial dir under results/<slug>/<ts>/<trial>/."""
+    """Map trial_name -> trial dir under results/<slug>/<ts>/<trial>/.
+
+    ``job_root`` is normally the jobs root holding timestamped experiment dirs.
+    An in-place resume instead points at one experiment dir, whose trials sit
+    directly underneath, so that shape is accepted too.
+    """
     by_name: dict[str, Path] = {}
-    for run_dir in find_harbor_job_dirs(job_root):
+    run_dirs = find_harbor_job_dirs(job_root)
+    if not run_dirs and job_root.is_dir():
+        if any(sub.is_dir() and "__" in sub.name for sub in job_root.iterdir()):
+            run_dirs = [job_root]
+    for run_dir in run_dirs:
         for sub in run_dir.iterdir():
             if sub.is_dir() and "__" in sub.name:
                 by_name[sub.name] = sub
@@ -66,6 +99,8 @@ def split_proxy_log(
     manifest_path: Path,
     log_dir: Path | None = None,
     results_root: Path | None = None,
+    job_root: Path | None = None,
+    runtime_config: Path | None = None,
 ) -> int:
     manifest = json.loads(manifest_path.read_text())
 
@@ -88,8 +123,14 @@ def split_proxy_log(
         print(f"[split-proxy-log] no proxy log at {src}; nothing to split.")
         return 0
 
-    results_root = results_root or (_repo_root() / "results")
-    job_root = results_root / job_slug
+    # Where Harbor actually wrote the trials. Precedence: an explicit job root
+    # (in-place resume passes the exact experiment dir), then the runtime config's
+    # resolved jobs_dir, then the default results/<job_slug> layout. Without this
+    # a job using jobs_dir / jobs_dir_suffix would silently find no trials.
+    if job_root is None and runtime_config is not None:
+        job_root = _job_root_from_runtime_config(runtime_config)
+    if job_root is None:
+        job_root = (results_root or (_repo_root() / "results")) / job_slug
     trial_dirs = _trial_dirs_by_name(job_root)
     if not trial_dirs:
         print(f"[split-proxy-log] no trial dirs under {job_root}; leaving log in place.")
@@ -176,9 +217,22 @@ def main() -> int:
         "--log-dir", type=Path, default=None,
         help="Proxy log dir (default: <repo>/scripts/logs/proxy).",
     )
+    parser.add_argument(
+        "--job-dir", type=Path, default=None,
+        help="Harbor experiment dir holding the trials (in-place resume passes this).",
+    )
+    parser.add_argument(
+        "--runtime-config", type=Path, default=None,
+        help="Generated Harbor runtime YAML; its jobs_dir locates the trials.",
+    )
     args = parser.parse_args()
     try:
-        return split_proxy_log(args.manifest, args.log_dir)
+        return split_proxy_log(
+            args.manifest,
+            args.log_dir,
+            job_root=args.job_dir,
+            runtime_config=args.runtime_config,
+        )
     except Exception as exc:  # non-fatal: never gate a run
         print(f"[split-proxy-log] WARNING: {exc}", file=sys.stderr)
         return 0

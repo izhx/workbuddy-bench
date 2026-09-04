@@ -347,12 +347,47 @@ source "$SCRIPT_DIR/proxy/proxy-env.sh"
 PROXY_PID=""
 CLEANUP_DONE=0
 
+SPLIT_PROXY_LOG_DONE=0
+
+# Fan the run-level proxy request log out into per-trial agent/requests.jsonl.
+# record_full_io logs every request to one run-level <instance_id>.jsonl; each
+# record carries its trial_id, so this attributes them to trial dirs.
+#
+# Called from cleanup_instance (the EXIT/INT/TERM path) rather than only at the
+# end of the happy path: the proxy has already flushed complete records by the
+# time evaluation finishes, and a run can still exit non-zero afterwards (e.g.
+# Harbor's summary printer raising after every trial actually completed). Under
+# `set -e` that aborted the script before the old end-of-script call, losing the
+# split for runs whose data was fully intact. Idempotent + non-fatal.
+split_proxy_log_now() {
+    [ "${SPLIT_PROXY_LOG_DONE:-0}" = "1" ] && return 0
+    [ "${USE_LOCAL_PROXY:-}" = "1" ] || return 0
+    [ "${DRY_RUN:-0}" = "1" ] && return 0
+    [ -n "${MANIFEST_PATH:-}" ] && [ -f "${MANIFEST_PATH:-}" ] || return 0
+    SPLIT_PROXY_LOG_DONE=1
+    local split_cmd=(python3 -m workbuddy_bench.runner.split_proxy_log
+        --manifest "$MANIFEST_PATH")
+    [ -n "${PROXY_LOG_DIR:-}" ] && split_cmd+=(--log-dir "$PROXY_LOG_DIR")
+    # Point the splitter at the trials this run actually wrote: an in-place resume
+    # targets one experiment dir; otherwise the runtime config carries the
+    # resolved jobs_dir (which honors jobs_dir / jobs_dir_suffix).
+    if [ -n "${RESUME_IN_PLACE_PATH:-}" ]; then
+        split_cmd+=(--job-dir "$RESUME_IN_PLACE_PATH")
+    elif [ -n "${JOB_CONFIG_RUNTIME:-}" ]; then
+        split_cmd+=(--runtime-config "$JOB_CONFIG_RUNTIME")
+    fi
+    "${split_cmd[@]}" || echo "WARNING: proxy-log split failed (non-fatal)."
+}
+
 # Stop only the proxy THIS run started; verify the captured PID still runs our
 # job-private config before killing it. Never kill by port or broad pattern.
 cleanup_instance() {
     local rc="${1:-$?}"
     [ "${CLEANUP_DONE:-0}" = "1" ] && return "$rc"
     CLEANUP_DONE=1; set +e
+    # Split before tearing the proxy down: the split only reads the log file, but
+    # keeping the order stable means a slow split never races proxy shutdown.
+    split_proxy_log_now
     if [ -n "${PROXY_PID:-}" ] && kill -0 "$PROXY_PID" 2>/dev/null; then
         local cmd; cmd="$(ps -p "$PROXY_PID" -o args= 2>/dev/null || true)"
         if printf '%s' "$cmd" | grep -F -- "--config ${PROXY_CONFIG:-__none__}" >/dev/null 2>&1; then
@@ -597,6 +632,24 @@ if [ -n "$USE_LOCAL_PROXY" ] && [ "${SHARED_PROXY:-0}" = "1" ]; then
         exit 1
     fi
 
+    # record_full_io cannot be honored on a shared proxy: log_enabled is a
+    # start-up-time setting on the proxy process (the shared one seeds it false),
+    # and merging this run's route only updates routes — POST /admin/reload does
+    # not create a logger that was never registered at boot. Rather than run for
+    # hours and silently produce no request log, fail fast with the way out.
+    if python3 -c "
+import json, sys
+m = json.load(open('$MANIFEST_PATH'))
+sys.exit(0 if m.get('record_full_io') else 1)
+"; then
+        echo "ERROR: record_full_io: true is incompatible with SHARED_PROXY=1." >&2
+        echo "  The shared proxy starts with logging disabled and route reloads cannot" >&2
+        echo "  enable it, so no request log would be written for this run." >&2
+        echo "  Either unset SHARED_PROXY to use a job-private proxy (recommended)," >&2
+        echo "  or set record_full_io: false in the job." >&2
+        exit 1
+    fi
+
     # Back-fill the manifest proxy_url for runtime consumers. Ordinary runs also
     # feed it into prepare_job; in-place resume keeps the old Harbor config
     # immutable and uses WORKBUDDY_RUNTIME_PROXY_URL instead.
@@ -793,6 +846,10 @@ elif [ "${SHARDS:-1}" -gt 1 ] || [ "${HAS_TASK_SELECTION:-0}" -ne 0 ] || [ "${#R
     [ -n "${SHARD_CONCURRENCY:-}" ] && cmd+=(--per-shard-concurrency "$SHARD_CONCURRENCY")
     [ "${NO_FORCE_BUILD:-0}" = "1" ] && cmd+=(--no-force-build)
     [ "${DISABLE_VERIFICATION:-0}" = "1" ] && cmd+=(--disable-verification)
+    # sharded_eval composes its runtime config at this same generated path; record
+    # it so the proxy-log split can read the resolved jobs_dir back out of it. The
+    # splitter falls back to the default layout if the file is not there.
+    JOB_CONFIG_RUNTIME="$REPO_ROOT/.workspace/data/generated/jobs/$(basename "$JOB_CONFIG")"
     "${cmd[@]}"
 else
     JOB_CONFIG_RUNTIME="$(python3 -m workbuddy_bench.runner.prepare_job "$JOB_CONFIG" \
@@ -828,11 +885,9 @@ sys.exit(0 if (j.get('enabled') and (j.get('mode') or 'host_side') == 'host_side
 fi
 
 # ── Split the run-level proxy request log into per-trial files ────
-# record_full_io logs every request to one run-level <instance_id>.jsonl; fan it
-# out by trial_id into each results/<trial>/agent/requests.jsonl. Covers both the
-# sharded and non-sharded paths (they share one instance_id). No-op unless this
-# was a local_proxy run with record_full_io on. Non-fatal.
-if [ "$USE_LOCAL_PROXY" = "1" ]; then
-    python3 -m workbuddy_bench.runner.split_proxy_log --manifest "$MANIFEST_PATH" \
-        || echo "WARNING: proxy-log split failed (non-fatal)."
-fi
+# Fan <instance_id>.jsonl out by trial_id into each trial's agent/requests.jsonl.
+# Covers both the sharded and non-sharded paths (they share one instance_id).
+# Called here so the split happens while the happy path is still in scope; the
+# EXIT trap calls the same function (idempotent) so a non-zero exit or an
+# interrupt after evaluation still gets the records the proxy already wrote.
+split_proxy_log_now
