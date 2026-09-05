@@ -206,6 +206,8 @@ def build_proxy_config(
     # does not hardcode model-specific body knobs. Only added when the judge will
     # run (enabled).
     judge_route = _judge_route(manifest)
+    if judge_route and judge_route["slug"] == str(model_route) and judge_route.get("instance_id"):
+        raise ValueError("record_full_io requires distinct agent and judge routes")
     if judge_route and judge_route["slug"] != str(model_route):
         routes.append(judge_route)
 
@@ -274,10 +276,13 @@ def _judge_route(manifest: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     params = judge.get("params") if isinstance(judge.get("params"), dict) else {}
-    return _openai_judge_route(
+    route = _openai_judge_route(
         slug=slug, url_env=url_env, key_env=key_env,
         backend_model=backend_model, params=params,
     )
+    if manifest.get("record_full_io") and judge.get("mode") == "in_container":
+        route["instance_id"] = str(manifest.get("instance_id") or "")
+    return route
 
 
 def write_proxy_config(

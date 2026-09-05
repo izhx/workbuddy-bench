@@ -334,6 +334,17 @@ fi
 
 # ── Per-instance state ───────────────────────────────────────────
 INSTANCE_ID="${INSTANCE_ID:-${JOB_SLUG}-$$-$(date +%s)}"
+case "$INSTANCE_ID" in
+    .|..|*/*)
+        echo "ERROR: INSTANCE_ID must be a safe single path segment (got '$INSTANCE_ID')." >&2
+        exit 1
+        ;;
+esac
+INSTANCE_ID_BYTES="$(printf '%s' "$INSTANCE_ID" | LC_ALL=C wc -c)"
+if [ "$INSTANCE_ID_BYTES" -gt 128 ]; then
+    echo "ERROR: INSTANCE_ID must be at most 128 bytes (got $INSTANCE_ID_BYTES)." >&2
+    exit 1
+fi
 if [ -n "$RESUME_IN_PLACE" ]; then
     INSTANCE_STATE_DIR="$REPO_ROOT/scripts/logs/instances/$INSTANCE_ID-resume-$$-$(date +%s)"
 else
@@ -345,32 +356,9 @@ echo "Instance ID: $INSTANCE_ID"
 # shellcheck source=scripts/proxy/proxy-env.sh
 source "$SCRIPT_DIR/proxy/proxy-env.sh"
 PROXY_PID=""
-CLEANUP_DONE=0
-
-# Stop only the proxy THIS run started; verify the captured PID still runs our
-# job-private config before killing it. Never kill by port or broad pattern.
-cleanup_instance() {
-    local rc="${1:-$?}"
-    [ "${CLEANUP_DONE:-0}" = "1" ] && return "$rc"
-    CLEANUP_DONE=1; set +e
-    if [ -n "${PROXY_PID:-}" ] && kill -0 "$PROXY_PID" 2>/dev/null; then
-        local cmd; cmd="$(ps -p "$PROXY_PID" -o args= 2>/dev/null || true)"
-        if printf '%s' "$cmd" | grep -F -- "--config ${PROXY_CONFIG:-__none__}" >/dev/null 2>&1; then
-            echo "Cleanup: stopping job-private proxy PID=$PROXY_PID"
-            kill "$PROXY_PID" 2>/dev/null || true
-        fi
-    fi
-    # Remove this run's throwaway dataset copy (resolve_manifest staged it under
-    # .workspace/tmp/staged/<instance-id>; see _stage_dataset). Scoped to this
-    # instance id so concurrent runs don't clobber each other.
-    if [ -n "${INSTANCE_ID:-}" ]; then
-        rm -rf "${REPO_ROOT:-.}/.workspace/tmp/staged/$INSTANCE_ID" 2>/dev/null || true
-    fi
-    return "$rc"
-}
-trap 'rc=$?; trap - EXIT; cleanup_instance "$rc"; exit "$rc"' EXIT
-trap 'trap - INT TERM; cleanup_instance 130; exit 130' INT
-trap 'trap - INT TERM; cleanup_instance 143; exit 143' TERM
+# shellcheck source=scripts/lib/run_cleanup.sh
+source "$SCRIPT_DIR/lib/run_cleanup.sh"
+register_run_cleanup
 
 find_free_proxy_port() {
     local port="$1"
@@ -382,8 +370,9 @@ find_free_proxy_port() {
 # Dry-run never runs prepare_tasks, so nothing would mutate the real dataset:
 # skip staging (--no-stage) to avoid a needless dataset copy + leftover dir.
 MANIFEST_PATH="$INSTANCE_STATE_DIR/manifest.json"
-RESOLVE_STAGE_FLAG=()
-[ "$DRY_RUN" = "1" ] && [ -z "$RESUME_IN_PLACE" ] && RESOLVE_STAGE_FLAG=(--no-stage)
+RESOLVE_FLAGS=()
+[ "$DRY_RUN" = "1" ] && [ -z "$RESUME_IN_PLACE" ] && RESOLVE_FLAGS+=(--no-stage)
+[ "${SHARED_PROXY:-0}" != "1" ] || RESOLVE_FLAGS+=(--shared-proxy)
 TASK_IMAGE_TAG_INPUT="${TASK_IMAGE_TAG_CLI:-${TASK_IMAGE_TAG:-}}"
 RESOLVED_TASK_IMAGE_TAG=""
 if [ -n "$TASK_IMAGE_TAG_INPUT" ]; then
@@ -403,7 +392,7 @@ python3 -m workbuddy_bench.runner.resolve_manifest \
     --instance-id "$INSTANCE_ID" \
     --instance-dir "$INSTANCE_STATE_DIR" \
     --harness-backend local \
-    "${RESOLVE_STAGE_FLAG[@]}" \
+    "${RESOLVE_FLAGS[@]}" \
     > /dev/null
 echo "Manifest: $MANIFEST_PATH"
 
@@ -547,6 +536,7 @@ python3 -m workbuddy_bench.runner.validate_model --manifest "$MANIFEST_PATH"
 # Internal runtime override consumed by the WorkBuddy agent wrappers and the
 # CompositeVerifier. Never inherit a stale value from the caller into this run.
 unset WORKBUDDY_RUNTIME_PROXY_URL
+unset WORKBUDDY_VERIFIER_LLM_PROXY_ROUTE
 
 wait_for_proxy_route() {
     local route="$1" deadline=$(( SECONDS + ${PROXY_ROUTE_WAIT:-20} ))
@@ -586,7 +576,7 @@ if [ -n "$USE_LOCAL_PROXY" ] && [ "${SHARED_PROXY:-0}" = "1" ]; then
     # Detect-and-reuse a single shared proxy on the fixed port; never start or
     # stop it here (use scripts/proxy/proxy-shared.sh). This run only appends its route
     # and hot-reloads. We deliberately leave PROXY_PID/PROXY_CONFIG unset, so the
-    # EXIT trap's cleanup_instance is a no-op for the shared proxy (it must
+    # EXIT cleanup is a no-op for the shared proxy (it must
     # outlive us).
     mkdir -p "$PROXY_LOG_DIR"   # PROXY_PORT fixed here; no find_free_proxy_port
 
@@ -755,6 +745,18 @@ else
     echo "Harness: $HARNESS_DISPLAY_NAME ($AGENT_NAME)"
 fi
 
+# Old immutable resume configs predate the verifier proxy marker. Supply the
+# current route at runtime without changing the recorded config or API keys.
+if [ -n "$USE_LOCAL_PROXY" ]; then
+    WORKBUDDY_VERIFIER_LLM_PROXY_ROUTE="$(python3 - "$MANIFEST_PATH" <<'PY'
+import json, sys
+from workbuddy_bench.runner.judge_routing import verifier_side_llm_env
+print(verifier_side_llm_env(json.load(open(sys.argv[1]))).get("WORKBUDDY_VERIFIER_LLM_PROXY_ROUTE", ""))
+PY
+    )"
+    export WORKBUDDY_VERIFIER_LLM_PROXY_ROUTE
+fi
+
 # ── Run evaluation ───────────────────────────────────────────────
 prepare_effective_tasks
 
@@ -765,7 +767,7 @@ if [ -n "$RESUME_IN_PLACE" ]; then
         --task-image-tag "$RESOLVED_TASK_IMAGE_TAG")
     [ -z "$MAX_EXTRA_ATTEMPTS" ] || resume_cmd+=(--max-extra-attempts "$MAX_EXTRA_ATTEMPTS")
     resume_cmd+=("${RESUME_POLICY_FLAGS[@]+"${RESUME_POLICY_FLAGS[@]}"}")
-    "${resume_cmd[@]}"
+    run_tracked_foreground "${resume_cmd[@]}"
 
     # Judge exactly this Harbor experiment. Do not scan sibling timestamp dirs.
     if python3 -c "
@@ -774,7 +776,7 @@ j = (json.load(open('$MANIFEST_PATH')).get('llm_judge') or {})
 sys.exit(0 if (j.get('enabled') and (j.get('mode') or 'host_side') == 'host_side') else 1)
 "; then
         echo "=== Host-side LLM judge (in-place experiment only) ==="
-        python3 -m workbuddy_bench.runner.run_post_judge \
+        run_tracked_foreground python3 -m workbuddy_bench.runner.run_post_judge \
             --manifest "$MANIFEST_PATH" \
             --job-dir "$RESUME_IN_PLACE_PATH" \
             || echo "WARNING: host-side LLM judge failed (non-fatal; verifier reward stands)."
@@ -783,6 +785,7 @@ elif [ "${SHARDS:-1}" -gt 1 ] || [ "${HAS_TASK_SELECTION:-0}" -ne 0 ] || [ "${#R
     cmd=(python3 -m workbuddy_bench.runner.sharded_eval \
         --config "$JOB_CONFIG" \
         --shards "${SHARDS:-1}" \
+        --runtime-config-dir "$INSTANCE_STATE_DIR/jobs" \
         --manifest "$MANIFEST_PATH")
     for resume_job in "${RESUME_JOBS[@]}"; do
         cmd+=(--resume-job "$resume_job")
@@ -793,15 +796,18 @@ elif [ "${SHARDS:-1}" -gt 1 ] || [ "${HAS_TASK_SELECTION:-0}" -ne 0 ] || [ "${#R
     [ -n "${SHARD_CONCURRENCY:-}" ] && cmd+=(--per-shard-concurrency "$SHARD_CONCURRENCY")
     [ "${NO_FORCE_BUILD:-0}" = "1" ] && cmd+=(--no-force-build)
     [ "${DISABLE_VERIFICATION:-0}" = "1" ] && cmd+=(--disable-verification)
-    "${cmd[@]}"
+    # Keep the runtime config in this instance's state directory: later launches
+    # of the same job must not change the jobs_dir read by cleanup.
+    JOB_CONFIG_RUNTIME="$INSTANCE_STATE_DIR/jobs/$(basename "$JOB_CONFIG")"
+    run_tracked_foreground "${cmd[@]}"
 else
     JOB_CONFIG_RUNTIME="$(python3 -m workbuddy_bench.runner.prepare_job "$JOB_CONFIG" \
-        --output-dir "$REPO_ROOT/.workspace/data/generated/jobs" --manifest "$MANIFEST_PATH")"
+        --output-dir "$INSTANCE_STATE_DIR/jobs" --manifest "$MANIFEST_PATH")"
     echo "Runtime Harbor config: $JOB_CONFIG_RUNTIME"
     harbor_cmd=(harbor run -c "$JOB_CONFIG_RUNTIME" --path "$EFFECTIVE_TASKS_DIR")
     [ "${NO_FORCE_BUILD:-0}" = "1" ] && harbor_cmd+=(--no-force-build)
     [ "${DISABLE_VERIFICATION:-0}" = "1" ] && harbor_cmd+=(--disable-verification)
-    "${harbor_cmd[@]}"
+    run_tracked_foreground "${harbor_cmd[@]}"
 
     # ── Host-side LLM judge (non-sharded path) ───────────────────────
     # The sharded path runs the post-judge inside sharded_eval; the direct
@@ -820,19 +826,9 @@ j = (json.load(open('$MANIFEST_PATH')).get('llm_judge') or {})
 sys.exit(0 if (j.get('enabled') and (j.get('mode') or 'host_side') == 'host_side') else 1)
 "; then
         echo "=== Host-side LLM judge ==="
-        python3 -m workbuddy_bench.runner.run_post_judge \
+        run_tracked_foreground python3 -m workbuddy_bench.runner.run_post_judge \
             --manifest "$MANIFEST_PATH" \
             --runtime-config "$JOB_CONFIG_RUNTIME" \
             || echo "WARNING: host-side LLM judge failed (non-fatal; verifier reward stands)."
     fi
-fi
-
-# ── Split the run-level proxy request log into per-trial files ────
-# record_full_io logs every request to one run-level <instance_id>.jsonl; fan it
-# out by trial_id into each results/<trial>/agent/requests.jsonl. Covers both the
-# sharded and non-sharded paths (they share one instance_id). No-op unless this
-# was a local_proxy run with record_full_io on. Non-fatal.
-if [ "$USE_LOCAL_PROXY" = "1" ]; then
-    python3 -m workbuddy_bench.runner.split_proxy_log --manifest "$MANIFEST_PATH" \
-        || echo "WARNING: proxy-log split failed (non-fatal)."
 fi

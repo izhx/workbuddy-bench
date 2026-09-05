@@ -571,7 +571,9 @@ def manifest_connection_mode(manifest: dict[str, Any]) -> str:
     )
 
 
-def _model_connection(job: dict[str, Any], job_config_path: Path) -> str:
+def _model_connection(
+    job: dict[str, Any], job_config_path: Path, *, shared_proxy: bool = False
+) -> str:
     """Return the model connection mode requested by the job.
 
     Defaults to ``local_proxy``: runs through the bench proxy by default
@@ -591,6 +593,17 @@ def _model_connection(job: dict[str, Any], job_config_path: Path) -> str:
         raise ValueError(
             f"{job_config_path}: unsupported model_connection={value!r}; "
             f"expected one of {expected}"
+        )
+    if job.get("record_full_io") and value != "local_proxy":
+        raise ValueError(
+            f"{job_config_path}: record_full_io: true requires model_connection: local_proxy; "
+            f"the configured mode is {value!r}"
+        )
+    if job.get("record_full_io") and shared_proxy:
+        raise ValueError(
+            f"{job_config_path}: record_full_io: true is incompatible with SHARED_PROXY=1; "
+            "the shared proxy starts with request logging disabled and route reloads "
+            "cannot enable it. Unset SHARED_PROXY or set record_full_io: false."
         )
     return value
 
@@ -802,6 +815,7 @@ def resolve_manifest(
     model_config_path: Path,
     instance_id: str,
     force_proxy: bool = False,
+    shared_proxy: bool = False,
     harness_backend: str | None = None,
     stage: bool = True,
 ) -> dict[str, Any]:
@@ -822,6 +836,9 @@ def resolve_manifest(
     force_proxy
         Whether FORCE_PROXY=1 was set. This records a local-proxy requirement;
         callers must still request ``model_connection: local_proxy`` explicitly.
+    shared_proxy
+        Whether this run uses the long-lived shared proxy. Recording requires a
+        private proxy, so reject that combination before staging the dataset.
 
     Returns
     -------
@@ -838,6 +855,9 @@ def resolve_manifest(
     # Load configs
     job = load_yaml(job_config_path)
     job_slug = job_config_path.stem
+    # Validate connection/recording invariants before dataset staging or any
+    # other comparatively expensive resolution work.
+    model_connection = _model_connection(job, job_config_path, shared_proxy=shared_proxy)
 
     model_slug = job.get("model")
     harness_slug = job.get("harness")
@@ -961,7 +981,6 @@ def resolve_manifest(
     # ``model_connection`` is the operator-visible mode switch. We deliberately
     # do not auto-select proxy mode from protocol mismatch or extra_body; direct
     # mode records those requirements so run.sh can fail fast with a clear error.
-    model_connection = _model_connection(job, job_config_path)
     uses_local_proxy = model_connection == "local_proxy"
     uses_proxy = uses_local_proxy
     # Opt-in full request/response logging in the proxy, keyed per trial. Default
@@ -1190,6 +1209,7 @@ def resolve_and_write(
     model_config_path: Path,
     instance_id: str,
     force_proxy: bool = False,
+    shared_proxy: bool = False,
     harness_backend: str | None = None,
     stage: bool = True,
     resolved_at: str | None = None,
@@ -1206,6 +1226,7 @@ def resolve_and_write(
         model_config_path=model_config_path,
         instance_id=instance_id,
         force_proxy=force_proxy,
+        shared_proxy=shared_proxy,
         harness_backend=harness_backend,
         stage=stage,
     )
@@ -1250,6 +1271,10 @@ def main() -> int:
         help="Record FORCE_PROXY=1 as a local-proxy requirement; mode stays explicit",
     )
     parser.add_argument(
+        "--shared-proxy", action="store_true",
+        help="Validate for a long-lived shared proxy (full-I/O recording is unsupported)",
+    )
+    parser.add_argument(
         "--harness-backend", default=None,
         help="Harness execution backend (local) used for mount selection",
     )
@@ -1269,6 +1294,7 @@ def main() -> int:
             model_config_path=args.model_config,
             instance_id=args.instance_id,
             force_proxy=args.force_proxy,
+            shared_proxy=args.shared_proxy,
             harness_backend=args.harness_backend,
             stage=not args.no_stage,
             resolved_at=datetime.now(timezone.utc).isoformat(),

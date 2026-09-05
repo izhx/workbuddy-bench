@@ -59,6 +59,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--config", required=True, help="Harbor job config path.")
     parser.add_argument(
+        "--runtime-config-dir", type=Path, default=None,
+        help="Runtime YAML output directory (run.sh supplies instance-private state).",
+    )
+    parser.add_argument(
         "--shards",
         type=int,
         default=2,
@@ -344,7 +348,8 @@ def main() -> int:
     if not config_path.is_absolute():
         config_path = repo_root / config_path
     runtime_config_path = compose_job_config(
-        config_path, repo_root / ".workspace" / "data" / "generated" / "jobs",
+        config_path,
+        args.runtime_config_dir or repo_root / ".workspace" / "data" / "generated" / "jobs",
         manifest_path=manifest_path,
     )
     try:

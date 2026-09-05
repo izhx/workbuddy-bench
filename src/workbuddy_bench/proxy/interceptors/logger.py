@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import time
@@ -16,6 +17,32 @@ log = logging.getLogger("proxy.interceptor.log")
 _REASONING_KEYS = ("reasoning_content", "reasoning", "thinking", "thinking_content")
 
 
+def _readable_prefix(value: str, *, limit: int = 64) -> str:
+    """Return a short ASCII-only hint suitable for a single path segment."""
+
+    safe = "".join(
+        character
+        if character.isascii() and (character.isalnum() or character in "._-")
+        else "_"
+        for character in value
+    )
+    return safe[:limit] or "instance"
+
+
+def proxy_log_filename(instance_id: str) -> str:
+    """Return the canonical collision-resistant JSONL name for an instance.
+
+    A digest is always included.  Conditional sanitization alone cannot be
+    injective: for example, the old mapping sent both ``a:b`` and ``a_b`` to
+    ``a_b.jsonl``.
+    """
+
+    if not instance_id:
+        return "proxy_requests.jsonl"
+    digest = hashlib.sha256(instance_id.encode("utf-8")).hexdigest()
+    return f"{_readable_prefix(instance_id)}.{digest}.jsonl"
+
+
 class LogInterceptor:
     """Logs all exchanges to a JSONL file, compatible with the log viewer."""
 
@@ -27,9 +54,9 @@ class LogInterceptor:
         # Per-stream accumulators keyed by request_id
         self._stream_bufs: dict[str, _StreamAccumulator] = {}
         # Open log files keyed by instance_id ("" = shared file when a request
-        # has no instance_id). Files are opened lazily per id so each trial's
-        # requests land in <log_dir>/<instance_id>.jsonl, tying proxy logs back
-        # to results/<trial>/config.json (same instance_id).
+        # has no instance_id). Files are opened lazily using the shared canonical
+        # filename mapping, tying proxy logs back to results/<trial>/config.json
+        # via the same instance_id without unsafe or colliding path segments.
         self._log_files: dict[str, Any] = {}
 
         if self._log_dir:
@@ -46,7 +73,7 @@ class LogInterceptor:
         key = instance_id or ""
         fh = self._log_files.get(key)
         if fh is None:
-            name = f"{_safe_filename(instance_id)}.jsonl" if instance_id else "proxy_requests.jsonl"
+            name = proxy_log_filename(instance_id)
             path = self._log_dir / name
             fh = open(path, "a", buffering=1, encoding="utf-8")
             self._log_files[key] = fh
@@ -198,7 +225,12 @@ class LogInterceptor:
         # prefix (per-trial, set by the harness) and falls back to the route's
         # run-level instance_id when absent (legacy bare-token requests), so each
         # record still carries a key that ties it back to results/<trial>/config.json.
-        trial_id = (ctx.meta.get("trial_id") if ctx.meta else "") or _route_instance_id(ctx)
+        instance_id = _route_instance_id(ctx)
+        if instance_id:
+            # Explicit ownership lets the post-run splitter safely distinguish
+            # records even when two pre-hash legacy filenames collide.
+            record["instance_id"] = instance_id
+        trial_id = (ctx.meta.get("trial_id") if ctx.meta else "") or instance_id
         if trial_id:
             record["trial_id"] = trial_id
         if ctx.meta:
@@ -290,13 +322,6 @@ def _route_instance_id(ctx: RequestContext) -> str:
     """The route's instance_id for this request (empty when not set)."""
     route = getattr(ctx, "route", None)
     return getattr(route, "instance_id", "") or "" if route else ""
-
-
-# Filesystem-safe form of an instance_id for use as a log filename. instance_ids
-# are alphanumeric + dashes today, but model_slug-derived ids can contain "/" and
-# ":"; replace anything outside [A-Za-z0-9._-] so the path stays single-segment.
-def _safe_filename(name: str) -> str:
-    return "".join(c if (c.isalnum() or c in "._-") else "_" for c in name)
 
 
 def _json_safe(value: Any) -> Any:

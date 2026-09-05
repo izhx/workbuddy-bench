@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 from harbor.models.trial.paths import EnvironmentPaths
+from harbor.utils.env import redact_sensitive_value
 
 from workbuddy_bench.judge.core import (
     VERIFIER_LLM_ENV_PREFIX,
@@ -46,9 +48,50 @@ def merged_verifier_env(
         current_proxy_url = runtime_proxy_url()
         if current_proxy_url:
             env[verifier_base_key] = openai_api_base_url(current_proxy_url)
+        # prepare_job marks proxy routes explicitly. run.sh also exports the
+        # marker so resumes of old immutable configs get the current trial token.
+        proxy_route_key = f"{VERIFIER_LLM_ENV_PREFIX}PROXY_ROUTE"
+        proxy_route = env.get(proxy_route_key, os.environ.get(proxy_route_key, ""))
+        api_key = f"{VERIFIER_LLM_ENV_PREFIX}API_KEY"
+        if (
+            proxy_route
+            and env.get(f"{VERIFIER_LLM_ENV_PREFIX}MODEL") == proxy_route
+            and _is_proxy_route_token(env.get(api_key, ""), proxy_route)
+        ):
+            env[api_key] = f"{verifier.trial_paths.trial_dir.name}::{proxy_route}"
     if prepend_pythonpath:
         env["PYTHONPATH"] = _prepend_path(prepend_pythonpath, env.get("PYTHONPATH"))
     return env
+
+
+def _is_redacted(value: str) -> bool:
+    """Match Harbor's own redaction shape from ``redact_sensitive_value``."""
+
+    if value == redact_sensitive_value(""):
+        return True
+    return len(value) == len(redact_sensitive_value("x" * 9)) and value[4:8] == "****"
+
+
+def _is_proxy_route_token(api_key: str, proxy_route: str) -> bool:
+    """Report whether the key is a route token rather than a usable secret.
+
+    Harbor classifies ``*_API_KEY`` as sensitive and redacts it when persisting
+    the trial config, so an in-place resume rehydrates ``judg****2.6`` instead of
+    the route slug. Without accepting that, the per-trial token is never
+    re-injected on resume and every judge call of a retried trial lands in the
+    run-level log unattributed.
+
+    A redacted value cannot authenticate against anything, so replacing it is
+    safe regardless of what it once held. A real third-party key survives
+    persistence either literally or as a ``${VAR}`` template — neither is
+    redacted, so both are left untouched.
+    """
+
+    if not proxy_route:
+        return False
+    if api_key.rsplit("::", 1)[-1] == proxy_route:
+        return True
+    return _is_redacted(api_key)
 
 
 def _prepend_path(prefix: str, value: str | None) -> str:

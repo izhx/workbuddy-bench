@@ -95,7 +95,9 @@ def verifier_side_llm_env(
 ) -> dict[str, str]:
     """Return ``WORKBUDDY_VERIFIER_LLM_*`` env for Harbor runtime config."""
     endpoint = verifier_side_llm_endpoint(manifest)
-    return endpoint.to_env() if endpoint else {}
+    if endpoint is None:
+        return {}
+    return {**endpoint.to_env(), f"{VERIFIER_LLM_ENV_PREFIX}PROXY_ROUTE": endpoint.model}
 
 
 def in_container_verifier_llm_endpoint(
