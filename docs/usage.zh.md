@@ -83,8 +83,13 @@ uv run ./scripts/run.sh --job <job-slug>
 
 结果默认写入 `results/<job-slug>/<experiment-dir>/`。
 
-启用 `record_full_io: true` 时，`run.sh` 会在评测进程组和 private proxy 退出后拆分日志，生成各 trial 的
-`agent/requests.jsonl`，包括原地恢复移入对应 `.attempt-history` 的 trial。runtime YAML 保存在本次运行的
+启用 `record_full_io: true` 时，必须使用 `model_connection: local_proxy`，且不能设置 `SHARED_PROXY=1`。
+`run.sh` 会在评测进程组和 private proxy 退出后拆分日志，按实际记录生成：
+
+- `<trial>/agent/requests.jsonl`：agent 请求和响应。
+- `<trial>/verifier/requests.jsonl`：`in_container` judge 请求和响应。
+
+归档也包含原地恢复移入对应 `.attempt-history` 的 trial。runtime YAML 保存在本次运行的
 `scripts/logs/instances/<instance-id>/jobs/` 下，避免同一个 job 后续启动时覆盖它。
 如果只需手工重做拆分，先确认评测及该 proxy 已停止，再执行：
 
@@ -94,8 +99,11 @@ uv run python -m workbuddy_bench.runner.split_proxy_log \
   --job-dir results/<job-slug>/<experiment-dir>
 ```
 
-重复拆分不会重复追加已归档的请求；无法确认归属的记录保留在运行级源日志中。旧文件名仍支持。
+重复拆分不会重复追加已归档的请求；无法确认运行、trial 或请求用途的记录保留在运行级源日志中，默认位于
+`scripts/logs/proxy/`，可由 `PROXY_LOG_DIR` 覆盖；手工拆分时用 `--log-dir` 指定对应目录。旧版实例日志文件名仍支持。
 原地恢复的 state 目录使用 `<instance-id>-resume-<pid>-<timestamp>`，应使用对应目录中的 manifest。
+
+旧公共 `proxy_requests.jsonl` 不参与自动拆分。`host_side` post judge 不纳入本次 judge 归档支持。
 
 如果后续需要 `--resume-in-place`，初次运行就必须使用预构建 task 镜像，并保持相同 tag：
 

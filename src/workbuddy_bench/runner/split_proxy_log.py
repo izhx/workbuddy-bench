@@ -2,8 +2,8 @@
 
 The proxy cannot know Harbor's final trial directories while requests are in
 flight, so it writes one canonical run-level JSONL file. This independently
-callable finalizer attributes those records by ``trial_id`` and writes
-``agent/requests.jsonl`` below each matching trial.
+callable finalizer attributes those records by ``trial_id`` and route, writing
+``agent/requests.jsonl`` or ``verifier/requests.jsonl`` below each matching trial.
 
 Only ``model_connection: local_proxy`` runs with ``record_full_io`` enabled are
 applicable. Unattributed records remain in the source log. Successful records
@@ -426,20 +426,19 @@ def _source_signature(path: Path) -> tuple[int, int, int, int]:
 
 
 def _record_destination(
-    record: dict[str, object], trial_dirs: dict[str, Path], instance_id: str
+    record: dict[str, object], trial_dirs: dict[str, Path], instance_id: str,
+    route_outputs: dict[str, str],
 ) -> Path | None:
-    """Resolve the output separately from ownership checks and atomic commits.
-
-    Only agent output is supported today. Future request purposes can select
-    another file here without changing spooling, locking or retry semantics.
-    """
+    """Resolve trial and purpose without guessing when a route is unknown."""
 
     meta = record.get("meta")
     trial_id = record.get("trial_id") or (meta.get("trial_id") if isinstance(meta, dict) else "")
     if not isinstance(trial_id, str) or not trial_id or trial_id == instance_id:
         return None
     trial_dir = trial_dirs.get(trial_id)
-    return trial_dir / "agent" / "requests.jsonl" if trial_dir is not None else None
+    route = record.get("route")
+    output = route_outputs.get(route) if isinstance(route, str) else None
+    return trial_dir / output / "requests.jsonl" if trial_dir is not None and output else None
 
 
 def _split_locked(
@@ -447,6 +446,7 @@ def _split_locked(
     trial_dirs: dict[str, Path],
     instance_id: str,
     model_route: str,
+    route_outputs: dict[str, str],
 ) -> int:
     source_signature = _source_signature(src)
     attributed = unattributed = 0
@@ -472,7 +472,7 @@ def _split_locked(
                 if isinstance(record, dict):
                     owned, error = _record_belongs_to_instance(record, instance_id, model_route)
                     if owned:
-                        destination = _record_destination(record, trial_dirs, instance_id)
+                        destination = _record_destination(record, trial_dirs, instance_id, route_outputs)
                     else:
                         rejected_ownership[error] += 1
                 if destination is None:
@@ -565,6 +565,19 @@ def split_proxy_log(
         connection.get("model_route") if isinstance(connection, dict) else ""
     )
     model_route = str(manifest.get("model_route") or connection_route or "")
+    route_outputs = {model_route: "agent"} if model_route else {}
+    judge = manifest.get("llm_judge") or {}
+    judge_route = (
+        str(judge.get("model_slug") or "")
+        if judge.get("enabled") and judge.get("mode") == "in_container" else ""
+    )
+    if judge_route:
+        if judge_route == model_route:
+            # An old/hand-written manifest may share a route for both purposes.
+            # Keep those records in the source rather than misclassifying them.
+            route_outputs.pop(judge_route, None)
+        else:
+            route_outputs[judge_route] = "verifier"
 
     candidates = proxy_log_candidates(log_dir, instance_id)
     with _source_locks(candidates):
@@ -582,7 +595,7 @@ def split_proxy_log(
             )
             return 0
         for source in sources:
-            _split_locked(source, trial_dirs, instance_id, model_route)
+            _split_locked(source, trial_dirs, instance_id, model_route, route_outputs)
         return 0
 
 

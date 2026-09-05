@@ -536,6 +536,7 @@ python3 -m workbuddy_bench.runner.validate_model --manifest "$MANIFEST_PATH"
 # Internal runtime override consumed by the WorkBuddy agent wrappers and the
 # CompositeVerifier. Never inherit a stale value from the caller into this run.
 unset WORKBUDDY_RUNTIME_PROXY_URL
+unset WORKBUDDY_VERIFIER_LLM_PROXY_ROUTE
 
 wait_for_proxy_route() {
     local route="$1" deadline=$(( SECONDS + ${PROXY_ROUTE_WAIT:-20} ))
@@ -742,6 +743,18 @@ else
     echo "=== Running WorkBuddy Bench: $MODEL_SLUG ==="
     echo "Model: $MODEL_NAME (direct, $MODEL_PROTOCOL protocol)"
     echo "Harness: $HARNESS_DISPLAY_NAME ($AGENT_NAME)"
+fi
+
+# Old immutable resume configs predate the verifier proxy marker. Supply the
+# current route at runtime without changing the recorded config or API keys.
+if [ -n "$USE_LOCAL_PROXY" ]; then
+    WORKBUDDY_VERIFIER_LLM_PROXY_ROUTE="$(python3 - "$MANIFEST_PATH" <<'PY'
+import json, sys
+from workbuddy_bench.runner.judge_routing import verifier_side_llm_env
+print(verifier_side_llm_env(json.load(open(sys.argv[1]))).get("WORKBUDDY_VERIFIER_LLM_PROXY_ROUTE", ""))
+PY
+    )"
+    export WORKBUDDY_VERIFIER_LLM_PROXY_ROUTE
 fi
 
 # ── Run evaluation ───────────────────────────────────────────────

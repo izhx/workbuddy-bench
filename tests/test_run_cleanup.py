@@ -91,7 +91,8 @@ printf 'return:%s\n' "$rc"
     assert "--runtime-config" not in proc.stdout
 
 
-def test_real_writer_flushes_final_record_before_real_splitter(tmp_path: Path) -> None:
+@pytest.mark.parametrize("final_purpose", ["agent", "verifier"])
+def test_real_writer_flushes_final_record_before_real_splitter(tmp_path: Path, final_purpose: str) -> None:
     """A still-open source fd must be closed before the splitter can unlink it."""
 
     instance_id = "cleanup-integration"
@@ -111,6 +112,8 @@ def test_real_writer_flushes_final_record_before_real_splitter(tmp_path: Path) -
                 "job_slug": "job",
                 "model_connection": "local_proxy",
                 "record_full_io": True,
+                "model_route": "agent-route",
+                "llm_judge": {"enabled": True, "mode": "in_container", "model_slug": "judge-route"},
             }
         )
     )
@@ -118,14 +121,15 @@ def test_real_writer_flushes_final_record_before_real_splitter(tmp_path: Path) -
     source = log_dir / proxy_log_filename(instance_id)
     source.write_text(
         json.dumps(
-            {"id": "initial", "instance_id": instance_id, "trial_id": trial_name}
+            {"id": "initial", "instance_id": instance_id, "trial_id": trial_name, "route": "agent-route"}
         )
         + "\n"
     )
 
     ready = tmp_path / "writer-ready"
     final_record = json.dumps(
-        {"id": "on-term", "instance_id": instance_id, "trial_id": trial_name}
+        {"id": "on-term", "instance_id": instance_id, "trial_id": trial_name,
+         "route": "judge-route" if final_purpose == "verifier" else "agent-route"}
     )
     writer_script = r"""
 log_path=$1
@@ -169,7 +173,12 @@ run_cleanup_instance 0
             json.loads(line)
             for line in (trial / "agent" / "requests.jsonl").read_text().splitlines()
         ]
-        assert [record["id"] for record in requests] == ["initial", "on-term"]
+        assert [record["id"] for record in requests] == (
+            ["initial", "on-term"] if final_purpose == "agent" else ["initial"]
+        )
+        if final_purpose == "verifier":
+            records = (trial / "verifier" / "requests.jsonl").read_text().splitlines()
+            assert [json.loads(line)["id"] for line in records] == ["on-term"]
         assert not source.exists()
     finally:
         if writer.poll() is None:

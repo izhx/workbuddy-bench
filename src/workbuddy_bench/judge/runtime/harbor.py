@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +47,17 @@ def merged_verifier_env(
         current_proxy_url = runtime_proxy_url()
         if current_proxy_url:
             env[verifier_base_key] = openai_api_base_url(current_proxy_url)
+        # prepare_job marks proxy routes explicitly. run.sh also exports the
+        # marker so resumes of old immutable configs get the current trial token.
+        proxy_route_key = f"{VERIFIER_LLM_ENV_PREFIX}PROXY_ROUTE"
+        proxy_route = env.get(proxy_route_key, os.environ.get(proxy_route_key, ""))
+        api_key = f"{VERIFIER_LLM_ENV_PREFIX}API_KEY"
+        if (
+            proxy_route
+            and env.get(f"{VERIFIER_LLM_ENV_PREFIX}MODEL") == proxy_route
+            and env.get(api_key, "").rsplit("::", 1)[-1] == proxy_route
+        ):
+            env[api_key] = f"{verifier.trial_paths.trial_dir.name}::{proxy_route}"
     if prepend_pythonpath:
         env["PYTHONPATH"] = _prepend_path(prepend_pythonpath, env.get("PYTHONPATH"))
     return env

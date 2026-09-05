@@ -32,6 +32,7 @@ def _manifest(tmp_path: Path, instance_id: str = "current-instance") -> Path:
                 "model_route": f"{instance_id}__model",
                 "model_connection": "local_proxy",
                 "record_full_io": True,
+                "llm_judge": {"enabled": True, "mode": "in_container", "model_slug": "judge-model"},
             }
         )
     )
@@ -330,8 +331,9 @@ def test_duplicate_trial_name_selects_only_matching_instance(tmp_path: Path) -> 
 
 @pytest.mark.parametrize("from_jobs_root", [False, True])
 @pytest.mark.parametrize("has_active_trial", [False, True])
+@pytest.mark.parametrize("purpose", ["agent", "verifier"])
 def test_split_includes_archived_resume_rounds(
-    tmp_path: Path, from_jobs_root: bool, has_active_trial: bool
+    tmp_path: Path, from_jobs_root: bool, has_active_trial: bool, purpose: str
 ) -> None:
     experiment = tmp_path / "jobs" / "2026-09-05__00-00-00"
     archived = []
@@ -346,7 +348,9 @@ def test_split_includes_archived_resume_rounds(
     trials = archived + ([active] if active else [])
     log_dir = tmp_path / "logs"
     source = _write_source(log_dir, "current-instance", [
-        {"id": trial.name, "trial_id": trial.name} for trial in trials
+        {"id": trial.name, "trial_id": trial.name,
+         "route": "judge-model" if purpose == "verifier" else "current-instance__model"}
+        for trial in trials
     ])
 
     splitter.split_proxy_log(
@@ -356,8 +360,9 @@ def test_split_includes_archived_resume_rounds(
 
     assert not source.exists()
     for trial in trials:
-        assert [record["id"] for record in _records(trial / "agent/requests.jsonl")] == [trial.name]
-        assert not (trial / "verifier/requests.jsonl").exists()
+        assert [record["id"] for record in _records(trial / purpose / "requests.jsonl")] == [trial.name]
+        other = "agent" if purpose == "verifier" else "verifier"
+        assert not (trial / other / "requests.jsonl").exists()
 
 
 def test_exact_experiment_does_not_scan_sibling_history(tmp_path: Path) -> None:
@@ -428,19 +433,21 @@ def test_duplicate_trial_without_unique_match_stays_unattributed(
     assert all(not (trial / "agent" / "requests.jsonl").exists() for trial in trials)
 
 
+@pytest.mark.parametrize("same_trial_judge", [False, True])
 def test_partial_destination_failure_is_idempotent_on_retry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, same_trial_judge: bool
 ) -> None:
     experiment = tmp_path / "experiment"
     first = _trial(experiment, "a__one", "current-instance")
-    second = _trial(experiment, "b__two", "current-instance")
+    second = first if same_trial_judge else _trial(experiment, "b__two", "current-instance")
     log_dir = tmp_path / "logs"
     source = _write_source(
         log_dir,
         "current-instance",
         [
             {"id": "request-a", "trial_id": first.name},
-            {"id": "request-b", "trial_id": second.name},
+            {"id": "request-b", "trial_id": second.name,
+             "route": "judge-model" if same_trial_judge else "current-instance__model"},
         ],
     )
 
@@ -470,7 +477,8 @@ def test_partial_destination_failure_is_idempotent_on_retry(
     assert [record["id"] for record in _records(first / "agent" / "requests.jsonl")] == [
         "request-a"
     ]
-    assert [record["id"] for record in _records(second / "agent" / "requests.jsonl")] == [
+    second_output = second / ("verifier" if same_trial_judge else "agent") / "requests.jsonl"
+    assert [record["id"] for record in _records(second_output)] == [
         "request-b"
     ]
 
