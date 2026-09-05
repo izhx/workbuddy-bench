@@ -1,0 +1,25 @@
+# Verification job for the record_full_io proxy-log split.
+#
+# Two small office tasks, local_proxy + record_full_io, so the run finishes fast
+# and still exercises the split path end to end. Not an experiment config.
+
+model: dsv4-flash
+harness: claude-code/2.1.187
+dataset: datasets/wb-bench-office-v1.0/tasks
+harness_backend: local
+model_connection: local_proxy
+
+record_full_io: true
+
+n_attempts: 1
+
+task_selection:
+  mode: name
+  names:
+    - health-quote-L2-003
+    - ticket-weekly-L3-010
+
+llm_judge_override:
+  enabled: true
+  mode: in_container
+  model: judge-kimi-k2.6
