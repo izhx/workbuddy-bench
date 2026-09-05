@@ -24,7 +24,7 @@ cp .env.example .env
 
 ### 1.2 在 Docker 容器中运行项目
 
-也可以准备一个包含 Python 3.12、uv、Docker CLI、Compose/Buildx，以及 `ps`、`fuser` 的控制镜像，通过
+也可以准备一个包含 Python 3.12、uv、Docker CLI、Compose/Buildx，以及 `ps`、`fuser`、`setsid` 的控制镜像，通过
 [`configs/controller.compose.yaml`](../configs/controller.compose.yaml) 启动项目。控制容器复用宿主机
 Docker daemon，因此不需要在镜像内启动 Docker daemon。
 
@@ -82,6 +82,20 @@ uv run ./scripts/run.sh --job <job-slug>
 ```
 
 结果默认写入 `results/<job-slug>/<experiment-dir>/`。
+
+启用 `record_full_io: true` 时，`run.sh` 会在评测进程组和 private proxy 退出后拆分日志，生成各 trial 的
+`agent/requests.jsonl`，包括原地恢复移入对应 `.attempt-history` 的 trial。runtime YAML 保存在本次运行的
+`scripts/logs/instances/<instance-id>/jobs/` 下，避免同一个 job 后续启动时覆盖它。
+如果只需手工重做拆分，先确认评测及该 proxy 已停止，再执行：
+
+```bash
+uv run python -m workbuddy_bench.runner.split_proxy_log \
+  --manifest scripts/logs/instances/<instance-id>/manifest.json \
+  --job-dir results/<job-slug>/<experiment-dir>
+```
+
+重复拆分不会重复追加已归档的请求；无法确认归属的记录保留在运行级源日志中。旧文件名仍支持。
+原地恢复的 state 目录使用 `<instance-id>-resume-<pid>-<timestamp>`，应使用对应目录中的 manifest。
 
 如果后续需要 `--resume-in-place`，初次运行就必须使用预构建 task 镜像，并保持相同 tag：
 

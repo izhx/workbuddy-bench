@@ -9,8 +9,6 @@ non-zero after evaluation already finished.
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
 from pathlib import Path
 
 import yaml
@@ -19,12 +17,14 @@ from workbuddy_bench.runner.split_proxy_log import split_proxy_log
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INSTANCE_ID = "myjob-4242-1700000000"
+MODEL_ROUTE = f"{INSTANCE_ID}__model"
 
 
 def _manifest(tmp_path: Path, **overrides) -> Path:
     data = {
         "instance_id": INSTANCE_ID,
         "job_slug": "myjob",
+        "model_route": MODEL_ROUTE,
         "model_connection": "local_proxy",
         "record_full_io": True,
     }
@@ -37,7 +37,12 @@ def _manifest(tmp_path: Path, **overrides) -> Path:
 def _write_log(log_dir: Path, records: list[dict]) -> Path:
     log_dir.mkdir(parents=True, exist_ok=True)
     src = log_dir / f"{INSTANCE_ID}.jsonl"
-    src.write_text("".join(json.dumps(r) + "\n" for r in records))
+    owned_records = []
+    for record in records:
+        owned = dict(record)
+        owned.setdefault("route", MODEL_ROUTE)
+        owned_records.append(owned)
+    src.write_text("".join(json.dumps(r) + "\n" for r in owned_records))
     return src
 
 
@@ -131,124 +136,11 @@ def test_noop_when_record_full_io_off(tmp_path: Path) -> None:
     assert src.exists()  # left untouched
 
 
-def test_run_sh_splits_from_exit_trap_on_nonzero_eval() -> None:
-    """The split must survive a non-zero exit after evaluation finished.
+def test_run_sh_delegates_cleanup_instead_of_embedding_split_logic() -> None:
+    run_sh = (REPO_ROOT / "scripts" / "run.sh").read_text()
+    cleanup = (REPO_ROOT / "scripts" / "lib" / "run_cleanup.sh").read_text()
 
-    Harbor's summary printer can raise after every trial completed; under
-    ``set -e`` that aborted run.sh before the old end-of-script split call, so
-    fully-intact logs were never fanned out. Drive the real functions out of
-    scripts/run.sh to prove the exit path now covers it.
-    """
-    run_sh = REPO_ROOT / "scripts" / "run.sh"
-    body = run_sh.read_text()
-
-    def _extract(name: str) -> str:
-        start = body.index(f"{name}() {{")
-        depth = 0
-        for i in range(start, len(body)):
-            if body[i] == "{":
-                depth += 1
-            elif body[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    return body[start:i + 1]
-        raise AssertionError(f"unbalanced braces extracting {name}")
-
-    script = "\n".join([
-        "set -e",
-        "SPLIT_PROXY_LOG_DONE=0; CLEANUP_DONE=0",
-        "USE_LOCAL_PROXY=1; DRY_RUN=0; PROXY_LOG_DIR=''",
-        "RESUME_IN_PLACE_PATH=''; JOB_CONFIG_RUNTIME=''",
-        "MANIFEST_PATH=\"$1\"",
-        # Stub the splitter invocation: this test asserts the shell control flow,
-        # not the Python (covered by the cases above).
-        "python3() { echo SPLIT-RAN; }",
-        _extract("split_proxy_log_now"),
-        _extract("cleanup_instance"),
-        "trap 'rc=$?; trap - EXIT; cleanup_instance \"$rc\"; exit \"$rc\"' EXIT",
-        "false",  # harbor run exiting 1 after evaluation completed
-        "echo UNREACHABLE",
-    ])
-
-    proc = subprocess.run(
-        ["bash", "-c", script, "bash", str(REPO_ROOT / "pyproject.toml")],
-        capture_output=True, text=True,
-    )
-
-    assert "SPLIT-RAN" in proc.stdout, proc.stdout + proc.stderr
-    assert "UNREACHABLE" not in proc.stdout
-    # The eval failure is still reported; the split does not mask it.
-    assert proc.returncode == 1
-
-
-def test_run_sh_split_runs_once_on_success() -> None:
-    """Inline call + EXIT trap must not double-append records."""
-    run_sh = REPO_ROOT / "scripts" / "run.sh"
-    body = run_sh.read_text()
-
-    def _extract(name: str) -> str:
-        start = body.index(f"{name}() {{")
-        depth = 0
-        for i in range(start, len(body)):
-            if body[i] == "{":
-                depth += 1
-            elif body[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    return body[start:i + 1]
-        raise AssertionError(f"unbalanced braces extracting {name}")
-
-    script = "\n".join([
-        "set -e",
-        "SPLIT_PROXY_LOG_DONE=0; CLEANUP_DONE=0",
-        "USE_LOCAL_PROXY=1; DRY_RUN=0; PROXY_LOG_DIR=''",
-        "RESUME_IN_PLACE_PATH=''; JOB_CONFIG_RUNTIME=''",
-        "MANIFEST_PATH=\"$1\"",
-        "python3() { echo SPLIT-RAN; }",
-        _extract("split_proxy_log_now"),
-        _extract("cleanup_instance"),
-        "trap 'rc=$?; trap - EXIT; cleanup_instance \"$rc\"; exit \"$rc\"' EXIT",
-        "split_proxy_log_now",  # happy-path inline call
-    ])
-
-    proc = subprocess.run(
-        ["bash", "-c", script, "bash", str(REPO_ROOT / "pyproject.toml")],
-        capture_output=True, text=True,
-    )
-
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert proc.stdout.count("SPLIT-RAN") == 1, proc.stdout
-
-
-def test_run_sh_skips_split_on_dry_run() -> None:
-    run_sh = REPO_ROOT / "scripts" / "run.sh"
-    body = run_sh.read_text()
-    start = body.index("split_proxy_log_now() {")
-    depth = 0
-    for i in range(start, len(body)):
-        if body[i] == "{":
-            depth += 1
-        elif body[i] == "}":
-            depth -= 1
-            if depth == 0:
-                fn = body[start:i + 1]
-                break
-
-    script = "\n".join([
-        "set -e",
-        "SPLIT_PROXY_LOG_DONE=0",
-        "USE_LOCAL_PROXY=1; DRY_RUN=1; PROXY_LOG_DIR=''",
-        "RESUME_IN_PLACE_PATH=''; JOB_CONFIG_RUNTIME=''",
-        "MANIFEST_PATH=\"$1\"",
-        "python3() { echo SPLIT-RAN; }",
-        fn,
-        "split_proxy_log_now",
-        "echo DONE",
-    ])
-    proc = subprocess.run(
-        ["bash", "-c", script, "bash", str(REPO_ROOT / "pyproject.toml")],
-        capture_output=True, text=True,
-    )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "SPLIT-RAN" not in proc.stdout
-    assert "DONE" in proc.stdout
+    assert 'source "$SCRIPT_DIR/lib/run_cleanup.sh"' in run_sh
+    assert "register_run_cleanup" in run_sh
+    assert "workbuddy_bench.runner.split_proxy_log" not in run_sh
+    assert "workbuddy_bench.runner.split_proxy_log" in cleanup
