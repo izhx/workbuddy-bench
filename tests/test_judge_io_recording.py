@@ -14,6 +14,8 @@ import httpx
 import pytest
 import yaml
 
+from harbor.utils.env import templatize_sensitive_env
+
 from workbuddy_bench.judge.core.routing import verifier_llm_route_from_mapping
 from workbuddy_bench.judge.runtime.harbor import merged_verifier_env
 from workbuddy_bench.proxy import main as proxy
@@ -198,6 +200,25 @@ def test_run_sh_exports_current_verifier_route(tmp_path, mode, enabled):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.strip() == (JUDGE_ROUTE if mode == "in_container" and enabled else "")
+
+
+def test_verifier_token_refreshes_from_redacted_resume_config(tmp_path, monkeypatch):
+    """An in-place resume rehydrates a redacted key and must still get a token.
+
+    Harbor classifies ``*_API_KEY`` as sensitive, so the persisted trial config
+    holds ``judg****del`` rather than the route slug. Without accepting that
+    form the token is never re-injected and every judge call of a retried trial
+    lands in the run-level log unattributed.
+    """
+    monkeypatch.setenv("WORKBUDDY_RUNTIME_PROXY_URL", "http://current-proxy:4567")
+    saved = templatize_sensitive_env(
+        {PREFIX + "API_KEY": f"old-trial::{JUDGE_ROUTE}", PREFIX + "MODEL": JUDGE_ROUTE}
+    )
+    assert saved[PREFIX + "API_KEY"] != f"old-trial::{JUDGE_ROUTE}"  # redacted on persist
+    env = {**saved, PREFIX + "BASE_URL": "http://old-proxy/v1",
+           PREFIX + "PROXY_ROUTE": JUDGE_ROUTE}
+    merged = merged_verifier_env(_verifier(tmp_path / "task__retry", env))
+    assert merged[PREFIX + "API_KEY"] == f"task__retry::{JUDGE_ROUTE}"
 
 
 @pytest.mark.parametrize("marker", ["", JUDGE_ROUTE])
