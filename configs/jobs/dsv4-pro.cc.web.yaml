@@ -19,7 +19,7 @@
 
 # REQUIRED — model slug; must match a configs/models/<slug>.yaml file
 # (excluding `_template.*`).
-model: dsv4-flash
+model: dsv4-pro
 
 # REQUIRED — canonical harness slug: <family>/<version>, e.g.
 # codebuddy-code/2.103.4.
@@ -27,7 +27,7 @@ harness: claude-code/2.1.187
 
 # REQUIRED — dataset directory (relative to repo root). scripts/run.sh
 # reads this value as the only dataset source.
-dataset: datasets/wb-bench-sec-v1.0/tasks
+dataset: datasets/wb-bench-web-v1.0/tasks
 
 # REQUIRED — harness execution backend (where the harness/sandbox runs).
 harness_backend: local  # local
@@ -49,14 +49,14 @@ model_connection: local_proxy
 
 # OPTIONAL — override the agent / verifier container user for this job.
 # Default comes from configs/bench/::agent_user / ::verifier_user.
-agent_user: root  # TODO: some dirs are owned by root, unify to root for now
+# agent_user: root
 # verifier_user: root
 
 # OPTIONAL — extra hosts added to the agent-phase network allowlist (list).
 # Needed when local_proxy + egress control means the container reaches the
 # model only via host.docker.internal — that host must be allowlisted.
-extra_allowed_hosts:
-  - host.docker.internal
+# extra_allowed_hosts:
+#   - host.docker.internal
 
 # OPTIONAL — attempts per task; defaults to configs/bench/::n_attempts.
 # n_attempts: 3
@@ -77,11 +77,10 @@ record_full_io: true
 #
 # OPTIONAL — post-pipeline LLM judge override. Deep-merged onto
 # configs/bench/::llm_judge.
-# llm_judge_override:
-#   enabled: true
-#   api_base: <LLM_JUDGE_API_BASE>
-#   api_key_env: <LLM_JUDGE_API_KEY>
-#   model: <judge-model-id>
+llm_judge_override:
+  enabled: true
+  mode: in_container
+  model: judge-kimi-k2.6
 #
 # OPTIONAL — partial overlays deep-merged onto the bench / harness / model
 # layers (orchestrator_override, environment_override, model_params_override,
